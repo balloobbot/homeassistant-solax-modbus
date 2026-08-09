@@ -6,6 +6,7 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from modbus_connection import IllegalDataAddressError
 
 from custom_components.solax_modbus import BlockReadResult, PendingWrite, SolaXModbusHub
 from custom_components.solax_modbus.const import REGISTER_U16, PollOutcome
@@ -261,7 +262,7 @@ async def test_block_error_preserves_ignore_readerror_semantics(
     hub.cyclecount = 20
     hub._modbus_addr = 1
     hub._record_block_result = Mock()
-    hub.async_read_holding_registers = AsyncMock(return_value=SimpleNamespace(isError=lambda: True))
+    hub.async_read_holding_registers = AsyncMock(side_effect=IllegalDataAddressError())
     description = SimpleNamespace(key="vpp_status", ignore_readerror=ignore_readerror)
     block = SimpleNamespace(
         start=0x7594,
@@ -293,7 +294,7 @@ async def test_successful_awake_poll_retries_queued_sleep_write() -> None:
     )
     hub.writequeue[(request.unit, request.address)] = request
     hub.async_read_modbus_block = AsyncMock(return_value=successful_block())
-    hub.async_lowlevel_write_register = AsyncMock(return_value=SimpleNamespace(isError=lambda: False))
+    hub.async_lowlevel_write_register = AsyncMock(return_value=None)
 
     result = await hub.async_read_modbus_registers_all(group)
 

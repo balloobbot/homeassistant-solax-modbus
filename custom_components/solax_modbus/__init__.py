@@ -17,9 +17,7 @@ import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
-    CONF_HOST,
     CONF_NAME,
-    CONF_PORT,
     CONF_SCAN_INTERVAL,
     EVENT_HOMEASSISTANT_STOP,
     PERCENTAGE,
@@ -37,9 +35,13 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.event import async_track_time_interval
-from pymodbus.client import AsyncModbusTcpClient
-from pymodbus.exceptions import ConnectionException, ModbusException, ModbusIOException
-from pymodbus.framer import FramerType
+from modbus_connection import (
+    IllegalDataAddressError,
+    IllegalFunctionError,
+    ModbusConnectionError,
+    ModbusError,
+    ModbusExceptionError,
+)
 
 from .connection import (
     describe_modbus_connection,
@@ -62,14 +64,11 @@ from .const import (
     CONF_MODBUS_ADDR,
     CONF_PLUGIN,
     CONF_SERIAL_PORT,
-    CONF_TCP_TYPE,
     CONF_TIME_OUT,
     DEFAULT_BAUDRATE,
     DEFAULT_INVERTER_POWER_KW,
     DEFAULT_MODBUS_ADDR,
-    DEFAULT_PORT,
     DEFAULT_SERIAL_PORT,
-    DEFAULT_TCP_TYPE,
     DEFAULT_TIME_OUT,
     DOMAIN,
     INVERTER_IDENT,
@@ -82,9 +81,6 @@ from .const import (
     REGISTER_S32,
     REGISTER_STR,
     REGISTER_TYPE_WORDS,
-    REGISTER_U8H,
-    REGISTER_U8L,
-    REGISTER_U16,
     REGISTER_U32,
     REGISTER_ULSB16MSB16,
     REGISTER_WORDS,
@@ -128,12 +124,13 @@ from .const import (
 from .const import (
     WRITE_MULTISINGLE_MODBUS as WRITE_MULTISINGLE_MODBUS,
 )
-from .modbus_transport import CoreModbusTransport, ModbusTransport, NativeModbusTransport, UnavailableModbusTransport
-from .pymodbus_compat import DataType, convert_from_registers, convert_to_registers, pymodbus_version_info
+from .fields import field_for
+from .modbus_link import acquire as acquire_modbus_link
+from .modbus_link import build_params, describe
+from .modbus_link import release as release_modbus_link
+from .modbus_transport import CoreModbusTransport, LibraryModbusTransport, ModbusTransport, UnavailableModbusTransport
 from .sensor import SolaXModbusSensor
-from .serial_modbus import AsyncSerialModbusClient, SerialModbusError
 
-RETRIES = 1  # was 6 then 0, which worked also, but 1 is probably the safe choice
 INVALID_START = 99999
 VERBOSE_CYCLES = 20
 COMM_HISTORY_LIMIT = 100
@@ -509,8 +506,16 @@ class RegisterEncodingError(HomeAssistantError):
     """Raised when a value cannot be represented by its Modbus register type."""
 
 
+class RegisterValueError(HomeAssistantError):
+    """Raised when a decoded value falls outside the range its unit allows.
+
+    A frame that decodes to an impossible temperature or frequency is a frame
+    that was misread, so it fails the whole group read rather than publishing.
+    """
+
+
 class SolaXModbusHub:
-    """Thread safe wrapper class for pymodbus."""
+    """One inverter: its register map, its polling groups and its writes."""
 
     def __init__(
         self,
@@ -520,9 +525,6 @@ class SolaXModbusHub:
     ) -> None:
         config = entry.options
         name = config[CONF_NAME]
-        host = config.get(CONF_HOST, None)
-        port = config.get(CONF_PORT, DEFAULT_PORT)
-        tcp_type = config.get(CONF_TCP_TYPE, DEFAULT_TCP_TYPE)
         modbus_addr = config.get(CONF_MODBUS_ADDR, DEFAULT_MODBUS_ADDR)
         if modbus_addr is None:
             modbus_addr = DEFAULT_MODBUS_ADDR
@@ -545,26 +547,13 @@ class SolaXModbusHub:
         # explicit init for stop flag
         self._stopping = False
         self._transport: ModbusTransport
-        if interface == "serial":
-            self._transport = NativeModbusTransport(
-                AsyncSerialModbusClient(
-                    port=serial_port,
-                    baudrate=baudrate,
-                    parity="N",
-                    stopbits=1,
-                    bytesize=8,
-                    timeout=time_out,
-                    retries=RETRIES,
-                )
+        # The link parameters, kept so the shared connection can be released on stop.
+        self._link_params = None if interface == "core" else build_params(config)
+        if self._link_params is not None:
+            self._transport = LibraryModbusTransport(
+                acquire_modbus_link(hass, self._link_params, name, timeout=time_out),
+                describe(self._link_params),
             )
-        elif interface == "tcp":
-            if tcp_type == "rtu":
-                client = AsyncModbusTcpClient(host=host, port=port, timeout=time_out, framer=FramerType.RTU, retries=RETRIES)
-            elif tcp_type == "ascii":
-                client = AsyncModbusTcpClient(host=host, port=port, timeout=time_out, framer=FramerType.ASCII, retries=RETRIES)
-            else:
-                client = AsyncModbusTcpClient(host=host, port=port, timeout=time_out, retries=RETRIES)
-            self._transport = NativeModbusTransport(client)
         elif interface == "core":
             self._transport = CoreModbusTransport(
                 hass,
@@ -573,11 +562,10 @@ class SolaXModbusHub:
             )
         else:
             self._transport = UnavailableModbusTransport(interface)
-        self._lock = asyncio.Lock()
+        # No request lock: the connection serializes its own traffic, and the
+        # inverter is selected per request through its unit handle.
         self._poll_data_lock = asyncio.Lock()
         self._name: str = name
-        # following call will modify and extend client in case old modbus API needs to be used
-        _LOGGER.debug(f"{name}: using pymodbus version {pymodbus_version_info()}")
 
         self.inverterNameSuffix = config.get(CONF_INVERTER_NAME_SUFFIX)
         self.inverterPowerKw = config.get(CONF_INVERTER_POWER_KW, DEFAULT_INVERTER_POWER_KW)
@@ -1196,8 +1184,22 @@ class SolaXModbusHub:
         return self._name
 
     async def async_close(self) -> None:
-        """Disconnect client."""
+        """Drop the link while keeping the transport usable.
+
+        Called when the last entity goes away: there is nothing left to poll,
+        so the socket or serial port is given up, and the next request - a
+        write, or a re-added entity - opens it again.
+        """
+        await self._transport.disconnect()
+
+    async def _async_release_transport(self) -> None:
+        """Let go of the transport for good, at unload or shutdown."""
         await self._transport.close()
+        if self._link_params is not None:
+            # The link is shared with any other inverter on this endpoint; it
+            # only closes once the last of them lets go.
+            params, self._link_params = self._link_params, None
+            await release_modbus_link(self._hass, params, self._name)
 
     async def async_stop(self) -> None:
         """Stop polling/timers and close transport deterministically."""
@@ -1242,7 +1244,7 @@ class SolaXModbusHub:
             except Exception:
                 pass
         # 2d) cancel in-flight I/O tasks immediately and collect their
-        # cancellation results so pymodbus shutdown exceptions do not leak.
+        # cancellation results so shutdown Modbus errors do not leak.
         inflight_tasks = list(self._inflight_tasks)
         for task in inflight_tasks:
             try:
@@ -1260,9 +1262,9 @@ class SolaXModbusHub:
             self._probe_ready.set()
         except Exception:
             pass
-        # 4) close transport
+        # 4) release transport
         try:
-            await self.async_close()
+            await self._async_release_transport()
         except Exception:
             pass
 
@@ -1293,10 +1295,12 @@ class SolaXModbusHub:
         _LOGGER.debug(f"{self._name}: in-flight Modbus task ended during shutdown: {exc}")
 
     def _is_expected_shutdown_modbus_error(self, ex: BaseException) -> bool:
-        """Return True for pymodbus cancellation errors caused by HA shutdown."""
+        """Return True for a Modbus failure caused by Home Assistant shutting down."""
+        # Stopping cancels the in-flight requests, and a request cancelled
+        # mid-flight surfaces as a torn-down link rather than a device fault.
         if not getattr(self, "_stopping", False):
             return False
-        return isinstance(ex, ModbusIOException) and "Request cancelled outside pymodbus" in str(ex)
+        return isinstance(ex, ModbusConnectionError)
 
     async def _check_connection(self) -> bool:
         if getattr(self, "_stopping", False):
@@ -1319,64 +1323,46 @@ class SolaXModbusHub:
         return await self._transport.connect()
 
     async def _handle_transport_exception(self, exception_error: BaseException, operation: str) -> None:
-        """Reset only connections that are known to be unusable."""
+        """Recycle only links that are known to be unusable."""
         if getattr(self, "_stopping", False):
             return
 
-        connection_lost = isinstance(exception_error, ConnectionException) or not self._transport.is_connected()
-        if connection_lost:
-            _LOGGER.debug(f"{self._name}: {operation} lost the connection; resetting transport before the next request")
-            await self._transport.close()
+        if isinstance(exception_error, ModbusConnectionError) or not self._transport.is_connected():
+            _LOGGER.debug(f"{self._name}: {operation} lost the connection; dropping the link before the next request")
+            await self._transport.disconnect()
             return
 
-        _LOGGER.debug(
-            f"{self._name}: {operation} failed while the transport remains connected; leaving retry and reconnect handling to the transport"
-        )
+        _LOGGER.debug(f"{self._name}: {operation} failed while the link is still up; the next request retries on it")
 
-    async def async_read_holding_registers(self, unit: int, address: int, count: int) -> Any:
-        """Read holding registers."""
+    async def async_read_holding_registers(self, unit: int, address: int, count: int) -> list[int]:
+        """Read holding registers, or raise ``ModbusError``."""
         return await self._async_read_registers("holding", unit, address, count)
 
-    async def async_read_input_registers(self, unit: int, address: int, count: int) -> Any:
-        """Read input registers."""
+    async def async_read_input_registers(self, unit: int, address: int, count: int) -> list[int]:
+        """Read input registers, or raise ``ModbusError``."""
         return await self._async_read_registers("input", unit, address, count)
 
-    async def _async_read_registers(self, register_type: str, unit: int, address: int, count: int) -> Any:
-        """Read registers through the configured transport."""
-        async with self._lock:
-            if getattr(self, "_stopping", False):
-                return None
-            if not await self._check_connection():
-                return None
-            try:
-                _LOGGER.debug(f"{self._name}: READ {register_type.upper()} device={unit} addr=0x{address:x} cnt={count}")
-                response = await self._track_task(self._transport.read(register_type, unit, address, count))
-            except (ModbusException, SerialModbusError, AttributeError, TypeError) as exception_error:
-                error = f"Error: device: {unit} address: 0x{address:x} -> {exception_error!s}"
-                if self._is_expected_shutdown_modbus_error(exception_error):
-                    _LOGGER.debug(f"{self._name}: ignoring Modbus read cancellation during shutdown: {error}")
-                    return None
-                _LOGGER.error(error)
-                if getattr(self, "_stopping", False):
-                    _LOGGER.debug(f"{self._name}: ModbusException during shutdown - skipping reconnect")
-                    return None
-                await self._handle_transport_exception(exception_error, f"{register_type} read")
-                return None
-        return response
+    async def _async_read_registers(self, register_type: str, unit: int, address: int, count: int) -> list[int]:
+        """Read registers through the configured transport.
 
-    def _validate_write_response(self, response: Any, *, unit: int, address: int, operation: str) -> Any:
-        """Raise when pymodbus did not confirm a write operation."""
-        if response is None:
-            raise HomeAssistantError(f"{self._name}: {operation} returned no response for device {unit} at register 0x{address:x}")
+        Raises ``ModbusError``: the typed subclass says what went wrong, which
+        is what the block reader keys its quarantine and reconnect decisions
+        off. Requests connect on demand and the connection serializes them, so
+        there is no lock or connect check here.
+        """
+        if getattr(self, "_stopping", False):
+            raise ModbusConnectionError(f"{self._name}: integration is stopping")
+        _LOGGER.debug(f"{self._name}: READ {register_type.upper()} device={unit} addr=0x{address:x} cnt={count}")
         try:
-            is_error = bool(response.isError())
-        except (AttributeError, TypeError) as ex:
-            raise HomeAssistantError(
-                f"{self._name}: {operation} returned an invalid response for device {unit} at register 0x{address:x}: {response}"
-            ) from ex
-        if is_error:
-            raise HomeAssistantError(f"{self._name}: {operation} was rejected by device {unit} at register 0x{address:x}: {response}")
-        return response
+            registers = await self._track_task(self._transport.read(register_type, unit, address, count))
+        except ModbusError as exception_error:
+            if self._is_expected_shutdown_modbus_error(exception_error):
+                _LOGGER.debug(f"{self._name}: ignoring Modbus read failure during shutdown: {exception_error}")
+                raise
+            _LOGGER.error(f"Error: device: {unit} address: 0x{address:x} -> {exception_error!s}")
+            await self._handle_transport_exception(exception_error, f"{register_type} read")
+            raise
+        return cast(list[int], registers)
 
     def _encode_write_value(
         self,
@@ -1387,19 +1373,9 @@ class SolaXModbusHub:
     ) -> list[int]:
         """Validate and encode one value before it reaches the transport."""
         effective_type = register_data_type or (REGISTER_S16 if single_register else None)
-        if effective_type is None:
-            raise RegisterEncodingError(f"{self._name}: unsupported register data type {register_data_type}")
-        data_type_enum = cast(Any, DataType)
-        data_types: dict[str, Any] = {
-            REGISTER_U16: data_type_enum.UINT16,
-            REGISTER_S16: data_type_enum.INT16,
-            REGISTER_U32: data_type_enum.UINT32,
-            REGISTER_F32: data_type_enum.FLOAT32,
-            REGISTER_S32: data_type_enum.INT32,
-        }
-        data_type = data_types.get(effective_type)
-        word_count = REGISTER_TYPE_WORDS.get(effective_type)
-        if data_type is None or word_count is None:
+        word_count = REGISTER_TYPE_WORDS.get(effective_type) if effective_type else None
+        field = field_for(effective_type, word_count=word_count, word_order=self.plugin.order32 or "big")
+        if effective_type is None or word_count is None or field is None:
             raise RegisterEncodingError(f"{self._name}: unsupported register data type {register_data_type}")
         if single_register and word_count != 1:
             raise RegisterEncodingError(
@@ -1414,7 +1390,7 @@ class SolaXModbusHub:
                 minimum, maximum = REGISTER_INT_RANGES[effective_type]
                 if value < minimum or value > maximum:
                     raise RegisterEncodingError(f"{self._name}: value {value} is outside the {effective_type} register range {minimum}..{maximum}")
-            registers = cast(list[int], convert_to_registers(value, data_type, self.plugin.order32))
+            registers = field.encode(value)
         except RegisterEncodingError:
             raise
         except (OverflowError, TypeError, ValueError, struct.error) as ex:
@@ -1464,29 +1440,24 @@ class SolaXModbusHub:
         *,
         multiple: bool,
         operation: str,
-    ) -> Any:
-        """Write encoded registers through the configured transport."""
+    ) -> None:
+        """Write encoded registers through the configured transport.
+
+        A write that returns is a write the device acknowledged: the transport
+        raises for a refusal, a timeout and a dead link alike.
+        """
         if getattr(self, "_stopping", False):
             raise HomeAssistantError(f"{self._name}: integration is stopping")
-        async with self._lock:
-            if not await self._check_connection():
-                raise HomeAssistantError(f"{self._name}: inverter is not connected")
-            try:
-                response = await self._track_task(self._transport.write(unit, address, values, multiple=multiple))
-            except (ModbusException, SerialModbusError, AttributeError, TypeError) as ex:
-                await self._handle_transport_exception(ex, operation)
-                raise HomeAssistantError(f"{self._name}: {operation} failed: {ex}") from ex
-        return self._validate_write_response(
-            response,
-            unit=unit,
-            address=address,
-            operation=operation,
-        )
+        try:
+            await self._track_task(self._transport.write(unit, address, values, multiple=multiple))
+        except ModbusError as ex:
+            await self._handle_transport_exception(ex, operation)
+            raise HomeAssistantError(f"{self._name}: {operation} failed: {ex}") from ex
 
-    async def async_lowlevel_write_register(self, unit: int, address: int, payload: int, register_data_type: str | None = None) -> Any:
+    async def async_lowlevel_write_register(self, unit: int, address: int, payload: int, register_data_type: str | None = None) -> None:
         try:
             regs = self._encode_write_value(payload, register_data_type, single_register=True)
-            response = await self._async_transport_write(
+            await self._async_transport_write(
                 unit=unit,
                 address=address,
                 values=regs,
@@ -1499,10 +1470,9 @@ class SolaXModbusHub:
             raise
 
         if hasattr(self.plugin, "log_register_write"):
-            self.plugin.log_register_write(self, address, unit, payload, result=response)
-        return response
+            self.plugin.log_register_write(self, address, unit, payload, result=regs)
 
-    async def async_write_register(self, unit: int, address: int, payload: int, register_data_type: str | None = None) -> Any:
+    async def async_write_register(self, unit: int, address: int, payload: int, register_data_type: str | None = None) -> None:
         """Write register."""
         awake = self.plugin.isAwake(self.data)
         if awake:
@@ -1516,7 +1486,7 @@ class SolaXModbusHub:
         )
         try:
             # Some commands are accepted even while the inverter reports sleep mode.
-            response = await self.async_lowlevel_write_register(
+            await self.async_lowlevel_write_register(
                 unit,
                 address,
                 payload,
@@ -1554,14 +1524,17 @@ class SolaXModbusHub:
                 _LOGGER.warning(f"{self._name}: inverter wake-up command failed after confirmed write: {ex}")
         else:
             _LOGGER.warning("cannot wakeup inverter: no awake button found")
-        return response
 
     async def async_write_registers_single(
         self, unit: int, address: int, payload: int, register_data_type: str | None = None
-    ) -> Any:  # Needs adapting for register queue
-        """Write registers multi, but write only one register of type 16bit"""
+    ) -> None:  # Needs adapting for register queue
+        """Write registers multi, but write only one register of type 16bit.
+
+        The forced write-multiple (FC16) some inverters need for a register
+        write-single (FC06) would be rejected on.
+        """
         regs = self._encode_write_value(payload, register_data_type, single_register=True)
-        return await self._async_transport_write(
+        await self._async_transport_write(
             unit=unit,
             address=address,
             values=regs,
@@ -1569,7 +1542,7 @@ class SolaXModbusHub:
             operation="multi-function single-register write",
         )
 
-    async def async_write_registers_multi(self, unit: int, address: int, payload: list[tuple[Any, Any]]) -> Any:  # Needs adapting for register queue
+    async def async_write_registers_multi(self, unit: int, address: int, payload: list[tuple[Any, Any]]) -> None:  # Needs adapting for register queue
         """Write registers multi.
         unit is the modbus address of the device that will be written to
         address us the start register address
@@ -1583,7 +1556,7 @@ class SolaXModbusHub:
         """
         regs_out = self._encode_multi_write_payload(payload)
         _LOGGER.debug(f"Ready to write multiple registers at 0x{address:02x}: {regs_out}")
-        return await self._async_transport_write(
+        await self._async_transport_write(
             unit=unit,
             address=address,
             values=regs_out,
@@ -1596,10 +1569,10 @@ class SolaXModbusHub:
         try:
             async with self._poll_data_lock:
                 return await self.async_read_modbus_registers_all(group)
-        except ConnectionException as ex:
+        except ModbusConnectionError as ex:
             _LOGGER.error(f"Reading data failed! Inverter is offline. {ex}")
-        except ModbusIOException as ex:
-            _LOGGER.error(f"ModbusIOError: {ex}")
+        except (ModbusError, RegisterValueError) as ex:
+            _LOGGER.error(f"Modbus read error: {ex}")
         except Exception as ex:
             _LOGGER.exception(f"Something went wrong reading from modbus: {ex}")
         return PollOutcome.FAILED
@@ -1617,60 +1590,20 @@ class SolaXModbusHub:
         return_value: int | None = None
         read_scale = descr.read_scale  # read scale might still be wrong the first polling cycle
         order32 = getattr(descr, "order32", None) or self.plugin.order32
-        val = None
+        val: Any = None
         if self.cyclecount < VERBOSE_CYCLES:
             _LOGGER.debug(f"{self._name}: treating register 0x{descr.register:02x} : {descr.key}")
         words_used = 0
+        field = field_for(descr.register_data_type, word_count=descr.wordcount, word_order=order32 or "big")
         try:
-            if descr.register_data_type == REGISTER_U16:
-                val = convert_from_registers(regs[idx : idx + 1], DataType.UINT16, self.plugin.order32)  # type: ignore[attr-defined]
-                words_used = 1
-            elif descr.register_data_type == REGISTER_S16:
-                val = convert_from_registers(regs[idx : idx + 1], DataType.INT16, self.plugin.order32)  # type: ignore[attr-defined]
-                words_used = 1
-            elif descr.register_data_type == REGISTER_U32:
-                val = convert_from_registers(regs[idx : idx + 2], DataType.UINT32, order32)  # type: ignore[attr-defined]
-                words_used = 2
-            elif descr.register_data_type == REGISTER_F32:
-                val = convert_from_registers(regs[idx : idx + 2], DataType.FLOAT32, order32)  # type: ignore[attr-defined]
-                words_used = 2
-            elif descr.register_data_type == REGISTER_S32:
-                val = convert_from_registers(regs[idx : idx + 2], DataType.INT32, order32)  # type: ignore[attr-defined]
-                words_used = 2
-            elif descr.register_data_type == REGISTER_STR:
-                wc = descr.wordcount or 0
-                raw = convert_from_registers(regs[idx : idx + wc], DataType.STRING, order32)  # type: ignore[attr-defined]
-                words_used = wc
-                val = raw.decode("ascii", errors="ignore") if isinstance(raw, (bytes, bytearray)) else str(raw)
-            elif descr.register_data_type == REGISTER_WORDS:
-                wc = descr.wordcount or 0
-                val = [convert_from_registers(regs[idx + i : idx + i + 1], DataType.UINT16, self.plugin.order32) for i in range(wc)]  # type: ignore[attr-defined]
-                words_used = wc
-            elif descr.register_data_type == REGISTER_ULSB16MSB16:
-                lo = convert_from_registers(regs[idx : idx + 1], DataType.UINT16, order32)  # type: ignore[attr-defined]
-                hi = convert_from_registers(regs[idx + 1 : idx + 2], DataType.UINT16, order32)  # type: ignore[attr-defined]
-                val = (hi + lo * 65536) if order32 == "big" else (lo + hi * 65536)
-                words_used = 2
-            elif descr.register_data_type == REGISTER_U8L:
-                if advance:
-                    base = convert_from_registers(regs[idx : idx + 1], DataType.UINT16, self.plugin.order32)  # type: ignore[attr-defined]
-                    words_used = 1
-                    val = base % 256
-                else:
-                    val = initval % 256
-                    words_used = 0
-            elif descr.register_data_type == REGISTER_U8H:
-                if advance:
-                    base = convert_from_registers(regs[idx : idx + 1], DataType.UINT16, self.plugin.order32)  # type: ignore[attr-defined]
-                    words_used = 1
-                    val = base >> 8
-                else:
-                    val = initval >> 8
-                    words_used = 0
-            else:
+            if field is None:
                 _LOGGER.warning(f"{self._name}: undefinded unit for entity {descr.key} - setting value to zero")
                 val = 0
-                words_used = 0
+            else:
+                # Two byte-half entities share one register: the second one is
+                # handed the word the first already read instead of advancing.
+                val = field.decode(regs[idx : idx + field.count] if advance else [initval])
+                words_used = field.count if advance else 0
         except Exception:
             if self.cyclecount < VERBOSE_CYCLES:
                 _LOGGER.warning(
@@ -1736,9 +1669,9 @@ class SolaXModbusHub:
                 max_val = getattr(descr, "max_value", None)
 
             if min_val is not None and return_value < min_val:
-                raise ModbusIOException(f"Value {return_value} of '{descr.key}' lower than {min_val}")  # type: ignore[no-untyped-call]
+                raise RegisterValueError(f"Value {return_value} of '{descr.key}' lower than {min_val}")
             if max_val is not None and return_value > max_val:
-                raise ModbusIOException(f"Value {return_value} of '{descr.key}' greater than {max_val}")  # type: ignore[no-untyped-call]
+                raise RegisterValueError(f"Value {return_value} of '{descr.key}' greater than {max_val}")
         # if (descr.sleepmode != SLEEPMODE_LASTAWAKE) or self.awakeplugin(self.data): self.data[descr.key] = return_value
         if (
             (self.tmpdata_expiry.get(descr.key, 0) == 0)
@@ -1757,31 +1690,41 @@ class SolaXModbusHub:
             _LOGGER.debug(
                 f"{self._name}: modbus {typ} block start: 0x{block.start:x} end: 0x{block.end:x}  len: {block.end - block.start} regs: {block.regs}"
             )
+        regs: list[int] = []
+        # A device that refuses this exact block by address or function code is
+        # telling us the block does not exist, which is worth acting on at once
+        # rather than after the usual run of failures.
+        unreadable = False
         try:
             if typ == "input":
-                realtime_data = await self.async_read_input_registers(
+                regs = await self.async_read_input_registers(
                     unit=self._modbus_addr,
                     address=block.start,
                     count=block.end - block.start,
                 )
             else:
-                realtime_data = await self.async_read_holding_registers(
+                regs = await self.async_read_holding_registers(
                     unit=self._modbus_addr,
                     address=block.start,
                     count=block.end - block.start,
                 )
+        except (IllegalDataAddressError, IllegalFunctionError) as ex:
+            # The inverter answered; it just will not serve these registers.
+            communication_succeeded = True
+            unreadable = True
+            errmsg = f"exception {str(ex)} "
+            _LOGGER.debug(f"{self._name}: {typ} block at 0x{block.start:x} refused as unreadable: {ex}")
+        except ModbusExceptionError as ex:
+            # Any other Modbus exception response still proves the link works.
+            communication_succeeded = True
+            errmsg = f"exception {str(ex)} "
+            _LOGGER.debug(f"{self._name}: {typ} block at 0x{block.start:x} rejected: {ex}")
         except Exception as ex:
             errmsg = f"exception {str(ex)} "
             _LOGGER.debug(f"{self._name}: exception reading {typ} {block.start} {errmsg}")
         else:
-            if realtime_data is None:
-                errmsg = "read_error "
-            else:
-                communication_succeeded = True
-                if realtime_data.isError():
-                    errmsg = "read_error "
+            communication_succeeded = True
         if errmsg is None:
-            regs = realtime_data.registers
             idx = 0
             fresh_keys: set[str] = set()
             for reg in block.regs:
@@ -1794,7 +1737,7 @@ class SolaXModbusHub:
                 descr = block.descriptions[reg]
 
                 if isinstance(descr, dict):
-                    base16 = convert_from_registers(regs[idx : idx + 1], DataType.UINT16, self.plugin.order32)  # type: ignore[attr-defined]
+                    base16 = regs[idx]
                     for k in descr:
                         self.treat_address(data, regs, idx, descr[k], initval=base16, advance=False, fresh_keys=fresh_keys)
                     idx += 1
@@ -1807,7 +1750,7 @@ class SolaXModbusHub:
                 fresh_keys=frozenset(fresh_keys),
             )
         else:  # block read failure
-            self._record_block_result(block, typ, False, errmsg)
+            self._record_block_result(block, typ, False, errmsg, unreadable=unreadable)
             # Check only the first item in the block for ignore_readerror behavior.
             firstdescr_raw = block.descriptions.get(block.start) or block.descriptions[block.regs[0]]
             firstdescr = next(iter(firstdescr_raw.values())) if isinstance(firstdescr_raw, dict) else firstdescr_raw
@@ -2242,7 +2185,7 @@ class SolaXModbusHub:
                         return block_obj.descriptions.get(addr) if block_obj.descriptions else None
         return None
 
-    def _record_block_result(self, block_obj: Any, typ: str, success: bool, errmsg: str | None = None) -> None:
+    def _record_block_result(self, block_obj: Any, typ: str, success: bool, errmsg: str | None = None, *, unreadable: bool = False) -> None:
         key = self._block_key(block_obj, typ)
         if success:
             self._comm_last_block_success_time = _mtime.time()
@@ -2256,7 +2199,10 @@ class SolaXModbusHub:
         failures = [ts for ts in self._comm_block_failures.get(key, []) if now - ts <= COMM_BLOCK_FAILURE_WINDOW]
         failures.append(now)
         self._comm_block_failures[key] = failures
-        if len(failures) >= COMM_BLOCK_FAILURE_THRESHOLD:
+        # An illegal-address or illegal-function answer is the device stating
+        # the block is not there, so there is nothing to wait for; anything else
+        # has to prove itself over several polls before we quarantine anything.
+        if unreadable or len(failures) >= COMM_BLOCK_FAILURE_THRESHOLD:
             self._schedule_runtime_bisect(block_obj, typ)
 
     def _schedule_runtime_bisect(self, block_obj: Any, typ: str) -> None:
@@ -2514,11 +2460,11 @@ class SolaXModbusHub:
                 read_coro = self.async_read_input_registers(unit=self._modbus_addr, address=block_obj.start, count=count)
             else:
                 read_coro = self.async_read_holding_registers(unit=self._modbus_addr, address=block_obj.start, count=count)
-            resp = await asyncio.wait_for(read_coro, timeout=timeout) if timeout is not None else await read_coro
-            if resp is None:
-                return False
-            is_err = getattr(resp, "isError", lambda: False)()
-            return not is_err
+            if timeout is not None:
+                await asyncio.wait_for(read_coro, timeout=timeout)
+            else:
+                await read_coro
+            return True
         except TimeoutError:
             timeout_msg = f"{timeout:.1f}s" if timeout is not None else "configured timeout"
             _LOGGER.debug(f"{self._name}: probe {typ} 0x{block_obj.start:x}-0x{block_obj.end:x} timed out after {timeout_msg}")

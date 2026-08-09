@@ -14,6 +14,7 @@ from homeassistant.const import (
     UnitOfTemperature,
 )
 from homeassistant.helpers.entity import EntityCategory  # type: ignore[attr-defined]  # HA stubs incomplete
+from modbus_connection.decode import decode_string
 
 from custom_components.solax_modbus.const import (
     CONF_READ_DCB,
@@ -36,8 +37,6 @@ from custom_components.solax_modbus.const import (
     BaseModbusSensorEntityDescription,
     plugin_base,
 )
-
-from .pymodbus_compat import DataType, convert_from_registers
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -105,14 +104,12 @@ async def _read_serialnr(hub: Any, address: int = 10000, count: int = 8, swapbyt
     res = None
     try:
         inverter_data = await hub.async_read_holding_registers(unit=hub._modbus_addr, address=address, count=count)
-        if inverter_data is not None and not inverter_data.isError():
-            raw = convert_from_registers(inverter_data.registers[0:count], DataType.STRING, "big")  # type: ignore[attr-defined]  # DataType enum dynamic
-            res = raw.decode("ascii", errors="ignore") if isinstance(raw, (bytes, bytearray)) else str(raw)
-            if swapbytes:
-                ba = bytearray(res, "ascii")  # convert to bytearray for swapping
-                ba[0::2], ba[1::2] = ba[1::2], ba[0::2]  # swap bytes ourselves - due to bug in Endian.Little ?
-                res = str(ba, "ascii")  # convert back to string
-            hub._seriesnumber = res
+        res = decode_string(inverter_data[0:count])
+        if swapbytes:
+            ba = bytearray(res, "ascii")  # convert to bytearray for swapping
+            ba[0::2], ba[1::2] = ba[1::2], ba[0::2]  # swap bytes ourselves - due to bug in Endian.Little ?
+            res = str(ba, "ascii")  # convert back to string
+        hub._seriesnumber = res
     except Exception:
         _LOGGER.warning(f"{hub.name}: attempt to read serialnumber failed at 0x{address:x}", exc_info=True)
     if not res:
@@ -125,9 +122,8 @@ async def _read_model(hub: Any, address: int = 10008) -> int | None:
     res = None
     try:
         inverter_data = await hub.async_read_holding_registers(unit=hub._modbus_addr, address=address, count=1)
-        if inverter_data is not None and not inverter_data.isError():
-            res = convert_from_registers(inverter_data.registers[0:1], DataType.UINT16, "big")  # type: ignore[attr-defined]  # DataType enum dynamic
-            hub._invertertype = res
+        res = inverter_data[0]
+        hub._invertertype = res
     except Exception:
         _LOGGER.warning(f"{hub.name}: attempt to read model failed at 0x{address:x}", exc_info=True)
     _LOGGER.info(f"Read {hub.name} 0x{address:x} model: {res}")

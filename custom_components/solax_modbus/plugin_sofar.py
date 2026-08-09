@@ -18,6 +18,8 @@ from homeassistant.const import (
     UnitOfTime,
 )
 from homeassistant.helpers.entity import EntityCategory  # type: ignore[attr-defined]  # HA stubs incomplete
+from modbus_connection import ModbusError
+from modbus_connection.decode import decode_string
 
 from custom_components.solax_modbus.const import (  # type: ignore[attr-defined]  # UnitOfReactivePower conditional import
     CONF_READ_DCB,
@@ -50,8 +52,6 @@ from custom_components.solax_modbus.const import (  # type: ignore[attr-defined]
     value_function_disabled_enabled,
     value_function_rtc_ymd,
 )
-
-from .pymodbus_compat import DataType, convert_from_registers
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -117,14 +117,12 @@ async def async_read_serialnr(hub: Any, address: int, swapbytes: bool) -> str | 
     res = None
     try:
         inverter_data = await hub.async_read_holding_registers(unit=hub._modbus_addr, address=address, count=7)
-        if inverter_data is not None and not inverter_data.isError():
-            raw = convert_from_registers(inverter_data.registers[0:7], DataType.STRING, "big")  # type: ignore[attr-defined]  # DataType enum dynamic
-            res = raw.decode("ascii", errors="ignore") if isinstance(raw, (bytes, bytearray)) else str(raw)
-            if swapbytes:
-                ba = bytearray(res, "ascii")  # convert to bytearray for swapping
-                ba[0::2], ba[1::2] = ba[1::2], ba[0::2]  # swap bytes ourselves - due to bug in Endian.LITTLE ?
-                res = str(ba, "ascii")  # convert back to string
-            hub.seriesnumber = res
+        res = decode_string(inverter_data[0:7])
+        if swapbytes:
+            ba = bytearray(res, "ascii")  # convert to bytearray for swapping
+            ba[0::2], ba[1::2] = ba[1::2], ba[0::2]  # swap bytes ourselves - due to bug in Endian.LITTLE ?
+            res = str(ba, "ascii")  # convert back to string
+        hub.seriesnumber = res
     except Exception:
         _LOGGER.warning(f"{hub.name}: attempt to read serialnumber failed at 0x{address:x}", exc_info=True)
     if not res:
@@ -4146,11 +4144,7 @@ class battery_config(base_battery_config):
             inverter_data = await hub.async_read_holding_registers(
                 unit=hub._modbus_addr, address=self.batt_pack_model_address, count=self.batt_pack_model_len
             )
-            if inverter_data is not None and not inverter_data.isError():
-                raw = convert_from_registers(inverter_data.registers[: self.batt_pack_model_len], DataType.STRING, "big")  # type: ignore[attr-defined]  # DataType enum dynamic
-                serial = raw.decode("ascii", errors="ignore") if isinstance(raw, (bytes, bytearray)) else str(raw)
-                return serial
-            return None
+            return decode_string(inverter_data[: self.batt_pack_model_len])
         except Exception:
             _LOGGER.warning("Cannot read batt pack serial")
             return None
@@ -4171,55 +4165,43 @@ class battery_config(base_battery_config):
         faulty_nr = 0
         payload = faulty_nr << 12 | batt_pack_nr << 8 | batt_nr
         for _retry in range(0, 10):
-            inverter_data = await hub.async_read_holding_registers(unit=hub._modbus_addr, address=self.bms_check_address, count=1)
-            if inverter_data is not None and not inverter_data.isError():
-                read = convert_from_registers(inverter_data.registers[:1], DataType.UINT16, "big")  # type: ignore[attr-defined]  # DataType enum dynamic
-                ok = read == payload
-                if not ok:
-                    await asyncio.sleep(0.3)
-                else:
-                    return True
-
-            else:
+            try:
+                inverter_data = await hub.async_read_holding_registers(unit=hub._modbus_addr, address=self.bms_check_address, count=1)
+            except ModbusError:
                 _LOGGER.error("can't read batt check register")
+                continue
+            if inverter_data[0] == payload:
+                return True
+            await asyncio.sleep(0.3)
         return False
 
     async def check_battery_on_end(
         self, hub: Any, old_data: dict[str, Any], new_data: dict[str, Any], key_prefix: str, batt_nr: int, batt_pack_nr: int
     ) -> bool:
-        # inverter_data = await hub.async_read_holding_registers(unit=hub._modbus_addr, address=0x9045, count=2)
-        # if not inverter_data.isError():
-        #     decoder = BinaryPayloadDecoder.fromRegisters(inverter_data.registers, byteorder=Endian.BIG)
-        #     batt_time = value_function_2byte_timestamp(decoder.decode_32bit_uint(), None, None)
-        #     _LOGGER.info(f"batt time: {batt_time}")
-
         faulty_nr = 0
         compare_value = faulty_nr << 12 | batt_pack_nr << 8 | batt_nr
-        inverter_data = await hub.async_read_holding_registers(unit=hub._modbus_addr, address=self.bms_check_address, count=1)
-        if not inverter_data.isError():
-            if inverter_data is not None and not inverter_data.isError():
-                new_value = convert_from_registers(inverter_data.registers[:1], DataType.UINT16, "big")  # type: ignore[attr-defined]  # DataType enum dynamic
-                _LOGGER.debug(f"check_battery_on_end: {hex(new_value)} {hex(compare_value)}")
-            if new_value == compare_value:
-                serial_key = key_prefix + "pack_serial_number"
-                if not new_data.__contains__(serial_key):
-                    _LOGGER.info(f"batt pack serial not received {serial_key}")
-                    return False
-                serial = new_data[serial_key]
-                _LOGGER.debug(f"batt pack serial: {serial}")
-                return bool(serial == self.batt_pack_serials[batt_nr][batt_pack_nr])
-            else:
-                return False
-
-        return False
+        try:
+            inverter_data = await hub.async_read_holding_registers(unit=hub._modbus_addr, address=self.bms_check_address, count=1)
+        except ModbusError:
+            return False
+        new_value = inverter_data[0]
+        _LOGGER.debug(f"check_battery_on_end: {hex(new_value)} {hex(compare_value)}")
+        if new_value != compare_value:
+            return False
+        serial_key = key_prefix + "pack_serial_number"
+        if not new_data.__contains__(serial_key):
+            _LOGGER.info(f"batt pack serial not received {serial_key}")
+            return False
+        serial = new_data[serial_key]
+        _LOGGER.debug(f"batt pack serial: {serial}")
+        return bool(serial == self.batt_pack_serials[batt_nr][batt_pack_nr])
 
     async def _determine_bat_quantitys(self, hub: Any) -> None:
         try:
             inverter_data = await hub.async_read_holding_registers(unit=hub._modbus_addr, address=self.bapack_number_address, count=1)
-            if inverter_data is not None and not inverter_data.isError():
-                val = convert_from_registers(inverter_data.registers[:1], DataType.UINT16, "big")  # type: ignore[attr-defined]  # DataType enum dynamic
-                self.number_cels_in_parallel = (val >> 8) & 0xFF  # high byte
-                self.number_strings = val & 0xFF  # low byte
+            val = inverter_data[0]
+            self.number_cels_in_parallel = (val >> 8) & 0xFF  # high byte
+            self.number_strings = val & 0xFF  # low byte
         except Exception:
             _LOGGER.warning(f"{hub.name}: attempt to read BaPack number failed at 0x{self.bapack_number_address:x}", exc_info=True)
 
@@ -4248,11 +4230,7 @@ class battery_config(base_battery_config):
         inverter_data = await hub.async_read_holding_registers(
             unit=hub._modbus_addr, address=self.batt_pack_serial_address, count=self.batt_pack_serial_len
         )
-        if inverter_data is not None and not inverter_data.isError():
-            raw = convert_from_registers(inverter_data.registers[: self.batt_pack_serial_len], DataType.STRING, "big")  # type: ignore[attr-defined]  # DataType enum dynamic
-            serial = raw.decode("ascii", errors="ignore") if isinstance(raw, (bytes, bytearray)) else str(raw)
-            return serial
-        return None
+        return decode_string(inverter_data[: self.batt_pack_serial_len])
 
 
 # ============================ plugin declaration =================================================

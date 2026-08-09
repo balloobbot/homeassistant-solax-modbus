@@ -110,11 +110,10 @@ async def async_read_serialnr(hub: Any, address: int) -> str | None:
     res = None
     try:
         inverter_data = await hub.async_read_holding_registers(unit=hub._modbus_addr, address=address, count=5)
-        if inverter_data and not inverter_data.isError():
-            raw_bytes = bytearray()
-            for register in inverter_data.registers[0:5]:
-                raw_bytes.extend(int(register).to_bytes(2, byteorder="big", signed=False))
-            res = raw_bytes.decode("ascii", errors="ignore").rstrip("\x00").strip() or None
+        raw_bytes = bytearray()
+        for register in inverter_data[0:5]:
+            raw_bytes.extend(int(register).to_bytes(2, byteorder="big", signed=False))
+        res = raw_bytes.decode("ascii", errors="ignore").rstrip("\x00").strip() or None
     except Exception:
         _LOGGER.warning(f"{hub.name}: attempt to read inverter identifier failed at 0x{address:x}", exc_info=True)
     if not res:

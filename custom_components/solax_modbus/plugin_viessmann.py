@@ -13,6 +13,7 @@ from homeassistant.const import (
     UnitOfTemperature,
 )
 from homeassistant.helpers.entity import EntityCategory  # type: ignore[attr-defined]
+from modbus_connection.decode import decode_string
 
 from custom_components.solax_modbus.const import (
     REG_HOLDING,
@@ -27,8 +28,6 @@ from custom_components.solax_modbus.const import (
     BaseModbusSensorEntityDescription,
     plugin_base,
 )
-
-from .pymodbus_compat import DataType, convert_from_registers
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -77,10 +76,8 @@ async def _read_string(hub: Any, address: int, count: int) -> str | None:
     res = None
     try:
         inverter_data = await hub.async_read_holding_registers(unit=hub._modbus_addr, address=address, count=count)
-        if inverter_data is not None and not inverter_data.isError():
-            raw = convert_from_registers(inverter_data.registers[0:count], DataType.STRING, "big")  # type: ignore[attr-defined]
-            res = raw.decode("ascii", errors="ignore") if isinstance(raw, (bytes, bytearray)) else str(raw)
-            res = res.replace("\x00", "").replace("\xff", "").strip()
+        res = decode_string(inverter_data[0:count])
+        res = res.replace("\x00", "").replace("\xff", "").strip()
     except Exception:
         _LOGGER.warning("%s: failed to read string at 0x%x", hub.name, address, exc_info=True)
     return res

@@ -18,6 +18,7 @@ from homeassistant.const import (
 from homeassistant.helpers.entity import (  # type: ignore[attr-defined]
     EntityCategory,
 )
+from modbus_connection.decode import decode_string
 
 from custom_components.solax_modbus.const import (
     REG_HOLDING,
@@ -39,8 +40,6 @@ from custom_components.solax_modbus.const import (
     value_function_firmware_decimal_hundredths,
     value_function_separate_registers_time,
 )
-
-from .pymodbus_compat import DataType, convert_from_registers
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -100,15 +99,10 @@ async def async_read_serialnr(hub: Any, address: int) -> str | None:
     try:
         _LOGGER.debug(f"{hub.name}: Attempting to read holding registers at 0x{address:x}, count=7, unit={hub._modbus_addr}")
         inverter_data = await hub.async_read_holding_registers(unit=hub._modbus_addr, address=address, count=7)
-        if not inverter_data.isError():
-            _LOGGER.debug(f"{hub.name}: Successfully read registers: {inverter_data.registers[0:7]}")
-            raw = convert_from_registers(inverter_data.registers[0:7], DataType.STRING, "big")  # type: ignore[attr-defined]  # Dynamic enum aliasing
-            _LOGGER.debug(f"{hub.name}: Converted raw data: {raw} (type: {type(raw)})")
-            res = raw.decode("ascii", errors="ignore") if isinstance(raw, (bytes, bytearray)) else str(raw)
-            hub.seriesnumber = res
-            _LOGGER.debug(f"{hub.name}: Decoded serial number: {res}")
-        else:
-            _LOGGER.debug(f"{hub.name}: Register read returned error: {inverter_data}")
+        _LOGGER.debug(f"{hub.name}: Successfully read registers: {inverter_data[0:7]}")
+        res = decode_string(inverter_data[0:7])
+        hub.seriesnumber = res
+        _LOGGER.debug(f"{hub.name}: Decoded serial number: {res}")
     except Exception as ex:
         _LOGGER.warning(f"{hub.name}: attempt to read serialnumber failed at 0x{address:x}", exc_info=True)
         _LOGGER.debug(f"{hub.name}: Exception type: {type(ex).__name__}, message: {ex}")
@@ -133,12 +127,9 @@ async def async_read_firmware(hub: Any, address: int = 0x25) -> float | None:
     try:
         _LOGGER.debug(f"{hub.name}: Attempting to read input registers at 0x{address:x}, count=1, unit={hub._modbus_addr}")
         fw_data = await hub.async_read_input_registers(unit=hub._modbus_addr, address=address, count=1)
-        if not fw_data.isError():
-            fw_raw = fw_data.registers[0]
-            res = fw_raw / 100.0  # Decimal hundredths (e.g., 707 → 7.07)
-            _LOGGER.debug(f"{hub.name}: Successfully read firmware: raw={fw_raw}, version={res:.2f}")
-        else:
-            _LOGGER.debug(f"{hub.name}: Register read returned error: {fw_data}")
+        fw_raw = fw_data[0]
+        res = fw_raw / 100.0  # Decimal hundredths (e.g., 707 → 7.07)
+        _LOGGER.debug(f"{hub.name}: Successfully read firmware: raw={fw_raw}, version={res:.2f}")
     except Exception as ex:
         _LOGGER.warning(f"{hub.name}: attempt to read firmware failed at 0x{address:x}", exc_info=True)
         _LOGGER.debug(f"{hub.name}: Exception type: {type(ex).__name__}, message: {ex}")
@@ -1684,16 +1675,13 @@ class solax_ev_charger_plugin(plugin_base):
         # allowedtypes flags work in this integration.
         try:
             type_data = await hub.async_read_input_registers(unit=hub._modbus_addr, address=0x0023, count=1)
-            if not type_data.isError():
-                val = type_data.registers[0]
-                ocpp_detected = (invertertype & GEN1 and val == 1) or (invertertype & GEN2 and val == 2)
-                if ocpp_detected:
-                    invertertype |= OCPP_TYPE
-                    _LOGGER.info(f"{hub.name}: OCPP detected (0x0023={val})")
-                else:
-                    _LOGGER.debug(f"{hub.name}: OCPP not active (0x0023={val})")
+            val = type_data[0]
+            ocpp_detected = (invertertype & GEN1 and val == 1) or (invertertype & GEN2 and val == 2)
+            if ocpp_detected:
+                invertertype |= OCPP_TYPE
+                _LOGGER.info(f"{hub.name}: OCPP detected (0x0023={val})")
             else:
-                _LOGGER.debug(f"{hub.name}: Could not read 0x0023 for OCPP probe (Modbus error)")
+                _LOGGER.debug(f"{hub.name}: OCPP not active (0x0023={val})")
         except Exception:
             _LOGGER.debug(f"{hub.name}: Could not read charger type register 0x0023", exc_info=True)
 

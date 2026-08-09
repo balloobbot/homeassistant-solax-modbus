@@ -225,12 +225,7 @@ async def test_determine_inverter_type_pri_serial(mock_hub: Any) -> None:
       3(0x33) 5(0x35) → 0x3335
     """
     mock_registers = [0x5052, 0x4935, 0x3032, 0x4839, 0x3136, 0x3834, 0x3335]
-    mock_hub.configure_read(
-        1,
-        0,
-        7,
-        type("MockResponse", (), {"registers": mock_registers, "isError": lambda self: False})(),
-    )
+    mock_hub.configure_read(1, 0, 7, mock_registers)
 
     config: dict[str, Any] = {"read_eps": False, "read_dcb": False}
     inverter_type = await solax_plugin.async_determineInverterType(mock_hub, config)

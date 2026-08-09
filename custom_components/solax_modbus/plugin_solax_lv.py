@@ -16,6 +16,7 @@ from homeassistant.const import (
     UnitOfTemperature,
 )
 from homeassistant.helpers.entity import EntityCategory  # type: ignore[attr-defined]  # HA stubs incomplete
+from modbus_connection.decode import decode_string
 
 from custom_components.solax_modbus.const import (
     BUTTONREPEAT_FIRST,
@@ -50,8 +51,6 @@ from custom_components.solax_modbus.const import (
     value_function_gen4time,
     value_str_default,
 )
-
-from .pymodbus_compat import DataType, convert_from_registers
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -182,11 +181,9 @@ async def async_read_serialnr(hub: Any, address: int) -> str | None:
     inverter_data = None
     try:
         inverter_data = await hub.async_read_holding_registers(unit=hub._modbus_addr, address=address, count=7)
-        if inverter_data is not None and not inverter_data.isError():
-            # Decode 7 registers (14 bytes) as string using clientless compat helper
-            raw = convert_from_registers(inverter_data.registers[0:7], DataType.STRING, "big")  # type: ignore[attr-defined]  # DataType enum dynamic
-            res = raw.decode("ascii", errors="ignore") if isinstance(raw, (bytes, bytearray)) else str(raw)
-            hub.seriesnumber = res
+        # Decode 7 registers (14 bytes) as an ASCII serial number
+        res = decode_string(inverter_data[0:7])
+        hub.seriesnumber = res
     except Exception:
         _LOGGER.warning(f"{hub.name}: attempt to read serialnumber failed at 0x{address:x} data: {inverter_data}", exc_info=True)
     if not res:
@@ -211,8 +208,7 @@ async def async_read_modbus_protocol_version(hub: Any) -> int:
     inverter_data = None
     try:
         inverter_data = await hub.async_read_holding_registers(unit=hub._modbus_addr, address=0x82, count=1)
-        if inverter_data is not None and not inverter_data.isError():
-            version = int(inverter_data.registers[0])
+        version = int(inverter_data[0])
     except Exception:
         _LOGGER.debug(f"{hub.name}: attempt to read Modbus protocol version failed data: {inverter_data}", exc_info=True)
 
@@ -237,15 +233,13 @@ async def async_read_inverter_firmware_info(hub: Any) -> int:
         # 0x7D..0x84 are legacy-safe firmware registers. Do not include 0x7B/0x7C here:
         # older maps may not expose the full-version registers and could reject the whole block.
         inverter_data = await hub.async_read_holding_registers(unit=hub._modbus_addr, address=0x7D, count=8)
-        if inverter_data is not None and not inverter_data.isError():
-            registers = inverter_data.registers
-            data["firmware_dsp"] = int(registers[0])
-            data["firmware_DSP_hardware_version"] = int(registers[1])
-            data["firmware_dsp_major"] = int(registers[2])
-            data["firmware_arm_major"] = int(registers[3])
-            version = int(registers[5])
-            data["firmware_arm"] = int(registers[6])
-            data["bootloader_version"] = int(registers[7])
+        data["firmware_dsp"] = int(inverter_data[0])
+        data["firmware_DSP_hardware_version"] = int(inverter_data[1])
+        data["firmware_dsp_major"] = int(inverter_data[2])
+        data["firmware_arm_major"] = int(inverter_data[3])
+        version = int(inverter_data[5])
+        data["firmware_arm"] = int(inverter_data[6])
+        data["bootloader_version"] = int(inverter_data[7])
     except Exception:
         _LOGGER.debug(f"{hub.name}: attempt to read inverter firmware info failed data: {inverter_data}", exc_info=True)
 
@@ -265,9 +259,8 @@ async def async_read_inverter_firmware_info(hub: Any) -> int:
         full_version_data = None
         try:
             full_version_data = await hub.async_read_holding_registers(unit=hub._modbus_addr, address=0x7B, count=2)
-            if full_version_data is not None and not full_version_data.isError():
-                data["firmware_version_dsp"] = int(full_version_data.registers[0])
-                data["firmware_version_arm"] = int(full_version_data.registers[1])
+            data["firmware_version_dsp"] = int(full_version_data[0])
+            data["firmware_version_arm"] = int(full_version_data[1])
         except Exception:
             _LOGGER.debug(f"{hub.name}: attempt to read full firmware version failed data: {full_version_data}", exc_info=True)
     else:

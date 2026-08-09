@@ -1,13 +1,13 @@
 """Tests for validated and atomic Modbus writes."""
 
-import asyncio
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 from homeassistant.exceptions import HomeAssistantError
-from pymodbus.pdu import ExceptionResponse
+from modbus_connection import IllegalDataValueError
+from modbus_connection.mock import MockModbusConnection, WriteEvent
 
 from custom_components.solax_modbus import (
     PendingWrite,
@@ -17,48 +17,43 @@ from custom_components.solax_modbus import (
     plugin_growatt,
 )
 from custom_components.solax_modbus.const import REGISTER_S16, REGISTER_S32, REGISTER_U16, REGISTER_U32
-from custom_components.solax_modbus.modbus_transport import CoreModbusTransport, NativeModbusTransport
+from custom_components.solax_modbus.modbus_transport import CoreModbusTransport, LibraryModbusTransport
 from custom_components.solax_modbus.switch import SolaXModbusSwitch
 
 
-class FakeClient:
-    """Minimal pymodbus client used by write tests."""
+class FakeDevice:
+    """An in-memory inverter recording the writes it is sent."""
 
-    def __init__(self, response: object) -> None:
-        self.response = response
-        self.write_register_calls = 0
-        self.write_registers_calls = 0
+    def __init__(self, *, refuse: bool = False) -> None:
+        self.connection = MockModbusConnection()
+        self.writes: list[WriteEvent] = []
+        for unit_id in (1, 2):
+            unit = self.connection.for_unit(unit_id)
+            unit.on_write(self.writes.append)
+            if refuse:
+                unit.fail_write(36, IllegalDataValueError())
 
-    async def write_register(self, **kwargs: object) -> object:
-        self.write_register_calls += 1
-        return self.response
+    @property
+    def write_register_calls(self) -> int:
+        return sum(1 for event in self.writes if event.function_code == 0x06)
 
-    async def write_registers(self, **kwargs: object) -> object:
-        self.write_registers_calls += 1
-        return self.response
+    @property
+    def write_registers_calls(self) -> int:
+        return sum(1 for event in self.writes if event.function_code == 0x10)
 
 
-def make_hub(client: FakeClient | None = None) -> Any:
+def make_hub(device: FakeDevice | None = None) -> Any:
     """Build the minimal hub state required by the write helpers."""
     hub = cast(Any, object.__new__(SolaXModbusHub))
     hub._name = "test"
     hub.plugin = SimpleNamespace(order32="big")
     hub.data = {}
     hub.writeLocals = {}
-    hub._transport = NativeModbusTransport(client)
-    hub._lock = asyncio.Lock()
+    hub._link_params = None
+    hub._transport = LibraryModbusTransport((device or FakeDevice()).connection, "mock:502")
     hub._inflight_tasks = set()
     hub._stopping = False
-    hub._check_connection = AsyncMock(return_value=True)
     return hub
-
-
-def test_validate_write_response_rejects_modbus_exception_response() -> None:
-    hub = make_hub()
-    response = ExceptionResponse(function_code=6, exception_code=2)
-
-    with pytest.raises(HomeAssistantError, match="was rejected"):
-        hub._validate_write_response(response, unit=1, address=36, operation="test write")
 
 
 def test_encode_multi_write_payload_is_all_or_nothing() -> None:
@@ -146,8 +141,8 @@ def test_growatt_vpp_allow_ac_charging_uses_supported_u16_write() -> None:
 
 @pytest.mark.asyncio
 async def test_multi_write_does_not_send_partially_encoded_payload() -> None:
-    client = FakeClient(SimpleNamespace(isError=lambda: False))
-    hub = make_hub(client)
+    device = FakeDevice()
+    hub = make_hub(device)
 
     with pytest.raises(HomeAssistantError, match="cannot encode"):
         await hub.async_write_registers_multi(
@@ -159,13 +154,13 @@ async def test_multi_write_does_not_send_partially_encoded_payload() -> None:
             ],
         )
 
-    assert client.write_registers_calls == 0
+    assert device.write_registers_calls == 0
 
 
 @pytest.mark.asyncio
 async def test_single_write_rejects_multi_register_type_before_transport() -> None:
-    client = FakeClient(SimpleNamespace(isError=lambda: False))
-    hub = make_hub(client)
+    device = FakeDevice()
+    hub = make_hub(device)
 
     with pytest.raises(RegisterEncodingError, match="requires 2 registers"):
         await hub.async_lowlevel_write_register(
@@ -175,16 +170,15 @@ async def test_single_write_rejects_multi_register_type_before_transport() -> No
             register_data_type=REGISTER_U32,
         )
 
-    assert client.write_register_calls == 0
-    assert client.write_registers_calls == 0
+    assert device.write_register_calls == 0
+    assert device.write_registers_calls == 0
 
 
 @pytest.mark.asyncio
 async def test_single_write_rejects_error_response() -> None:
-    client = FakeClient(ExceptionResponse(function_code=6, exception_code=2))
-    hub = make_hub(client)
+    hub = make_hub(FakeDevice(refuse=True))
 
-    with pytest.raises(HomeAssistantError, match="was rejected"):
+    with pytest.raises(HomeAssistantError, match="single-register write failed"):
         await hub.async_lowlevel_write_register(
             unit=1,
             address=36,
@@ -203,7 +197,7 @@ async def test_sleeping_write_queues_full_request_without_reporting_success() ->
     hub.async_lowlevel_write_register = AsyncMock(
         side_effect=[
             HomeAssistantError("write rejected"),
-            SimpleNamespace(isError=lambda: False),
+            None,
         ]
     )
 
@@ -225,8 +219,8 @@ async def test_sleeping_write_queues_full_request_without_reporting_success() ->
 
 @pytest.mark.asyncio
 async def test_sleeping_write_does_not_queue_unencodable_value() -> None:
-    client = FakeClient(SimpleNamespace(isError=lambda: False))
-    hub = make_hub(client)
+    device = FakeDevice()
+    hub = make_hub(device)
     hub.plugin.isAwake = Mock(return_value=False)
     hub.writequeue = {}
     hub.wakeupButton = SimpleNamespace(register=1, command=1)
@@ -241,13 +235,13 @@ async def test_sleeping_write_does_not_queue_unencodable_value() -> None:
         )
 
     assert hub.writequeue == {}
-    assert client.write_register_calls == 0
-    assert client.write_registers_calls == 0
+    assert device.write_register_calls == 0
+    assert device.write_registers_calls == 0
 
 
 @pytest.mark.asyncio
 async def test_core_multi_write_uses_core_client_and_validates_response() -> None:
-    response = SimpleNamespace(isError=lambda: False)
+    response = SimpleNamespace(registers=[], isError=lambda: False)
 
     class FakeCoreHub:
         def __init__(self) -> None:
@@ -272,18 +266,16 @@ async def test_core_multi_write_uses_core_client_and_validates_response() -> Non
         hub_getter=lambda hass, name: core_hub,
         reconnect_delay=0,
     )
-    hub._lock = asyncio.Lock()
+    hub._link_params = None
     hub._inflight_tasks = set()
     hub._stopping = False
-    hub._check_connection = AsyncMock(return_value=True)
 
-    result = await hub.async_write_registers_multi(
+    await hub.async_write_registers_multi(
         unit=1,
         address=100,
         payload=[(REGISTER_U16, 7), (REGISTER_S16, -2)],
     )
 
-    assert result is response
     assert core_hub.calls == [(1, 100, [7, 65534], "write_registers")]
 
 

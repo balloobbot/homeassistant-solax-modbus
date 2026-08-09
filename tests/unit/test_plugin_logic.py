@@ -91,7 +91,7 @@ async def test_determine_inverter_type_solax(mock_hub: Any) -> None:
     # ...
 
     mock_registers = [0x4833, 0x3454, 0x3130, 0x4831, 0x3233, 0x3435, 0x3637]
-    mock_hub.configure_read(1, 0, 7, type("MockResponse", (), {"registers": mock_registers, "isError": lambda: False}))
+    mock_hub.configure_read(1, 0, 7, mock_registers)
 
     # Config dict
     config = {"read_eps": False, "read_dcb": False}

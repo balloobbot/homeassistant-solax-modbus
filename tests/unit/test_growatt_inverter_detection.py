@@ -7,13 +7,10 @@ from custom_components.solax_modbus.plugin_growatt import AC, GEN3, GEN4, HYBRID
 from custom_components.solax_modbus.plugin_growatt import plugin_instance as growatt_plugin
 
 
-class GrowattResponse:
-    def __init__(self, value: str | None) -> None:
-        encoded = (value or "").encode("ascii").ljust(10, b"\x00")
-        self.registers = [int.from_bytes(encoded[offset : offset + 2], byteorder="big") for offset in range(0, 10, 2)]
-
-    def isError(self) -> bool:
-        return False
+def growatt_registers(value: str | None) -> list[int]:
+    """Pack an identifier the way the inverter reports it."""
+    encoded = (value or "").encode("ascii").ljust(10, b"\x00")
+    return [int.from_bytes(encoded[offset : offset + 2], byteorder="big") for offset in range(0, 10, 2)]
 
 
 class GrowattHub:
@@ -24,11 +21,11 @@ class GrowattHub:
         self.responses = responses
         self.read_addresses: list[int] = []
 
-    async def async_read_holding_registers(self, unit: int, address: int, count: int) -> GrowattResponse:
+    async def async_read_holding_registers(self, unit: int, address: int, count: int) -> list[int]:
         assert unit == self._modbus_addr
         assert count == 5
         self.read_addresses.append(address)
-        return GrowattResponse(self.responses.get(address))
+        return growatt_registers(self.responses.get(address))
 
 
 CONFIG: dict[str, Any] = {"read_eps": False, "read_dcb": False}

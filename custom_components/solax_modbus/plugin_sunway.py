@@ -18,6 +18,8 @@ from homeassistant.const import (
 from homeassistant.helpers.entity import (  # type: ignore[attr-defined]
     EntityCategory,
 )
+from modbus_connection import ModbusError
+from modbus_connection.decode import decode_string
 
 from custom_components.solax_modbus.const import (
     REG_HOLDING,
@@ -36,8 +38,6 @@ from custom_components.solax_modbus.const import (
     BaseModbusSwitchEntityDescription,
     plugin_base,
 )
-
-from .pymodbus_compat import DataType, convert_from_registers
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -938,15 +938,13 @@ class sunway_plugin(plugin_base):
     async def async_determineInverterType(self, hub: Any, configdict: dict[str, Any]) -> int:
         _LOGGER.info(f"{hub.name}: trying to determine SunWay inverter type")
 
-        inverter_data = await hub.async_read_holding_registers(unit=hub._modbus_addr, address=10000, count=4)
-
-        if inverter_data is None or inverter_data.isError():
+        try:
+            inverter_data = await hub.async_read_holding_registers(unit=hub._modbus_addr, address=10000, count=4)
+        except ModbusError:
             _LOGGER.error(f"{hub.name}: could not read serial number from address 10000. Please check connection and Modbus address.")
             return 0
 
-        raw = convert_from_registers(inverter_data.registers[:4], DataType.STRING, "big")  # type: ignore[attr-defined]  # Dynamic enum aliasing
-        seriesnumber = raw.decode("ascii", errors="ignore") if isinstance(raw, (bytes, bytearray)) else str(raw)
-        seriesnumber = seriesnumber.strip()
+        seriesnumber = decode_string(inverter_data[:4]).strip()
         hub.seriesnumber = seriesnumber
         _LOGGER.info(f"{hub.name}: Inverter serial number: {seriesnumber}")
 

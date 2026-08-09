@@ -16,6 +16,7 @@ from homeassistant.const import (
 from homeassistant.helpers.entity import (  # type: ignore[attr-defined]
     EntityCategory,
 )
+from modbus_connection.decode import decode_string
 
 from custom_components.solax_modbus.const import (  # type: ignore[attr-defined]
     CONF_READ_DCB,
@@ -38,8 +39,6 @@ from custom_components.solax_modbus.const import (  # type: ignore[attr-defined]
     plugin_base,
     value_function_disabled_enabled,
 )
-
-from .pymodbus_compat import DataType, convert_from_registers
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -102,10 +101,8 @@ async def async_read_serialnr(hub: Any, address: int) -> str | None:
     inverter_data = None
     try:
         inverter_data = await hub.async_read_holding_registers(unit=hub._modbus_addr, address=address, count=10)
-        if not inverter_data.isError():
-            raw = convert_from_registers(inverter_data.registers[0:10], DataType.STRING, "big")  # type: ignore[attr-defined]  # Dynamic enum aliasing
-            res = raw.decode("ascii", errors="ignore") if isinstance(raw, (bytes, bytearray)) else str(raw)
-            hub.seriesnumber = res
+        res = decode_string(inverter_data[0:10])
+        hub.seriesnumber = res
     except Exception:
         _LOGGER.warning(f"{hub.name}: attempt to read serialnumber failed at 0x{address:x} data: {inverter_data}", exc_info=True)
     if not res:
