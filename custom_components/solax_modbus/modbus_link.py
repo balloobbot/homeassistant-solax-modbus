@@ -42,9 +42,10 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-# modbus_connection defines this union but does not re-export it from the
-# package, so a consumer that stores "the parameters this entry uses" has to
-# name the union itself. SolaX only ever opens TCP sockets and serial ports.
+# modbus_connection has no public alias for the parameter union - 4.4.0 dropped
+# the internal one and spells the union inline - so a consumer that stores "the
+# parameters this entry uses" names it itself. SolaX only ever opens TCP sockets
+# and serial ports, so this is narrower than the library's four-way union.
 ModbusParams = ModbusTcpParams | ModbusSerialParams
 
 DATA_LINKS = "_modbus_links"

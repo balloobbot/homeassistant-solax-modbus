@@ -1,9 +1,10 @@
 """SolaX register data types as modbus-connection register fields.
 
 modbus-connection ships the common Modbus scalar types and expects a device
-library to define the exotic ones as ``RegisterField`` subclasses. These are
-SolaX's: the two byte halves that share one 16-bit register, a string whose
-words follow the plugin's 32-bit word order, and a plain list of raw words.
+library to define the exotic ones as ``RegisterField`` subclasses. Two are
+SolaX's: a string whose words follow the plugin's 32-bit word order, and a plain
+list of raw words. The two byte halves that share one 16-bit register are the
+library's own ``bits()`` field.
 
 The fields are used unbound (address 0): the hub owns block planning and passes
 the already-read words in, so only ``decode``/``encode`` matter here.
@@ -14,9 +15,9 @@ from __future__ import annotations
 from typing import Any
 
 from modbus_connection import WordOrder
-from modbus_connection.decode import combine_words, decode_string
+from modbus_connection.decode import decode_string
 from modbus_connection.encode import encode_string
-from modbus_connection.model import FloatField, NumberField, RegisterField
+from modbus_connection.model import FloatField, NumberField, RegisterField, bits
 
 from .const import (
     REGISTER_F32,
@@ -70,22 +71,6 @@ class WordsField(RegisterField[list[int]]):
         return [word & 0xFFFF for word in words]
 
 
-class LowByteField(RegisterField[int]):
-    """The low byte of a register shared with a :class:`HighByteField`."""
-
-    def decode(self, words: list[int], scale_exponent: int | None = None) -> int:
-        """Decode the low half of the register."""
-        return combine_words(words) & 0xFF
-
-
-class HighByteField(RegisterField[int]):
-    """The high byte of a register shared with a :class:`LowByteField`."""
-
-    def decode(self, words: list[int], scale_exponent: int | None = None) -> int:
-        """Decode the high half of the register."""
-        return combine_words(words) >> 8
-
-
 def _build(register_data_type: str, word_count: int, word_order: WordOrder) -> RegisterField[Any] | None:
     """Build the field for one SolaX register data type."""
     if register_data_type == REGISTER_U16:
@@ -108,9 +93,9 @@ def _build(register_data_type: str, word_count: int, word_order: WordOrder) -> R
     if register_data_type == REGISTER_WORDS:
         return WordsField(0, count=word_count)
     if register_data_type == REGISTER_U8L:
-        return LowByteField(0, count=1)
+        return bits(0, 0, 8)
     if register_data_type == REGISTER_U8H:
-        return HighByteField(0, count=1)
+        return bits(0, 8, 8)
     return None
 
 

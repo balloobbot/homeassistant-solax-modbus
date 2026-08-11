@@ -1,7 +1,7 @@
 # Migrating homeassistant-solax-modbus to modbus-connection
 
 A record of what this integration does, what the migration to
-[modbus-connection](https://github.com/home-assistant-libs/modbus-connection) 4.3.0
+[modbus-connection](https://github.com/home-assistant-libs/modbus-connection) 4.4.0
 actually required, and where the library got in the way.
 
 **Scope of the change.** The transport stack, the register codecs and the error
@@ -26,7 +26,7 @@ resolved and one holds, but not quite for the stated reason:
 | Forced FC16 for one register | `WRITE_MULTISINGLE_MODBUS`, `async_write_registers_single` | Supported — at the raw level it is just `unit.write_registers(addr, [v])`; the model's `force_fc16` flag covers the declarative path |
 | Callable/dict `scale` | `const.py:244` (the survey's "line 112" is stale) | Stays custom, as predicted — but the *dict* case would fit `NumberField(convert=...)`; only the callable is genuinely unmappable |
 
-PyPI's latest is 4.3.0, not the 4.1.0 in the brief; this targets 4.3.0.
+PyPI's latest is 4.4.0, not the 4.1.0 in the brief; this targets 4.4.0.
 
 ---
 
@@ -171,31 +171,44 @@ are Python *modules*, discovered by name and imported dynamically, and their
 
 ## 2. What internals of modbus-connection did you have to touch?
 
-Very little, which is the headline. Nothing was monkeypatched, and the only
-private thing reached for is a missing re-export.
+Nothing. Nothing was monkeypatched, and as of 4.4.0 nothing private is imported
+either.
 
-### Reached around: `ModbusParams` is not public
+### Declared locally, as the library now intends: `ModbusParams`
 
-`_client.py` defines and `__all__`-exports the union, but
-`modbus_connection/__init__.py` does not re-export it. The hub stores "the
-parameters this entry uses" so it can release the shared link later, and typing
-that attribute meant either importing from `modbus_connection._client` or
-redeclaring the union. I redeclared it, narrowed to what SolaX opens:
+The hub stores "the parameters this entry uses" so it can release the shared
+link later, and typing that attribute needs a name for the union. In 4.3.0
+`_client.py` defined and `__all__`-exported `ModbusParams` but
+`modbus_connection/__init__.py` did not re-export it, so the choice was to
+import from a private module or to redeclare. I redeclared, narrowed to what
+SolaX actually opens:
 
 ```python
 # modbus_link.py
 ModbusParams = ModbusTcpParams | ModbusSerialParams
 ```
 
-This is a one-line fix in the library.
+4.4.0 settled the question the other way: the alias is **deleted**, and the
+public constructors spell the union inline. So this is no longer a workaround
+awaiting a one-line fix — a consumer that wants to name the set of transports
+*it* supports is expected to declare it, and a narrower union is more honest
+here than the library's four-way one would have been. Anything that had imported
+`ModbusParams` from `modbus_connection._client` would have broken on 4.4.0; this
+did not.
 
 ### Subclassed as intended: `RegisterField`
 
-Three subclasses in `fields.py` cover what the library does not ship:
-`WordOrderedStringField`, `WordsField` (a raw list of words a plugin's value
-function picks apart), and `LowByteField`/`HighByteField`. Only `decode` is
-abstract, `encode` has a raising default, and the constructor takes `count` — all
-public, and the seam works exactly as the review claimed it would.
+Two subclasses in `fields.py` cover what the library does not ship:
+`WordOrderedStringField` and `WordsField` (a raw list of words a plugin's value
+function picks apart). Only `decode` is abstract, `encode` has a raising
+default, and the constructor takes `count` — all public, and the seam works
+exactly as the review claimed it would.
+
+There were four. `REGISTER_U8L`/`REGISTER_U8H` — the two byte halves sharing one
+16-bit register — were hand-rolled `LowByteField`/`HighByteField` doing their
+own mask and shift; 4.4.0's `bits()` is exactly that field, so they are now
+`bits(0, 0, 8)` and `bits(0, 8, 8)`. The existing decode tests
+(`0xAB12 → 0x12 / 0xAB`) pinned the swap.
 
 **But** I use fields *outside* a `Component`: constructed unbound at address 0
 and called purely as codecs, cached per `(type, width, word order)`. The hub owns
