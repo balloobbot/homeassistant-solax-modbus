@@ -5,7 +5,7 @@ description = "SolaX Modbus integration for Home Assistant"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "modbus-connection[pymodbus,tmodbus]>=4.5.0",
+    "modbus-connection[pymodbus,tmodbus]>=4.5.1",
 ]
 
 [dependency-groups]
