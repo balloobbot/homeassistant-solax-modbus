@@ -6,7 +6,6 @@ from typing import Any, cast
 import pytest
 from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PORT
 from modbus_connection import ModbusSerialParams, ModbusTcpParams
-from modbus_connection.pymodbus import ModbusConnection as PymodbusConnection
 from modbus_connection.tmodbus import ModbusConnection as TmodbusConnection
 
 from custom_components.solax_modbus import modbus_link
@@ -55,16 +54,20 @@ def test_core_modbus_and_incomplete_tcp_configs_have_no_link() -> None:
     assert modbus_link.build_params({CONF_INTERFACE: "tcp"}) is None
 
 
-def test_ascii_over_tcp_routes_to_the_pymodbus_backend() -> None:
-    # 4.6.0's tmodbus backend carries ASCII-over-TCP too, but the routing
-    # still picks pymodbus for it; a serial port must stay on tmodbus for its
-    # serialx URLs.
-    ascii_tcp = ModbusTcpParams(host="10.0.0.5", framer="ascii")
-    assert modbus_link._connection_class(ascii_tcp) is PymodbusConnection
+def test_every_link_type_rides_the_tmodbus_backend() -> None:
+    # Since 4.6.0 tmodbus carries ASCII-over-TCP too, so the pymodbus fallback
+    # (and its extra) are gone; every link build_params can produce must
+    # construct on tmodbus.
+    for params in (
+        ModbusTcpParams(host="10.0.0.5"),
+        ModbusTcpParams(host="10.0.0.5", framer="rtu"),
+        ModbusTcpParams(host="10.0.0.5", framer="ascii"),
+        ModbusSerialParams(device="/dev/ttyUSB0"),
+    ):
+        TmodbusConnection(params)
 
-    assert modbus_link._connection_class(ModbusTcpParams(host="10.0.0.5")) is TmodbusConnection
-    assert modbus_link._connection_class(ModbusTcpParams(host="10.0.0.5", framer="rtu")) is TmodbusConnection
-    assert modbus_link._connection_class(ModbusSerialParams(device="/dev/ttyUSB0")) is TmodbusConnection
+    ascii_link = modbus_link.acquire(fake_hass(), ModbusTcpParams(host="10.0.0.5", framer="ascii"), "inverter", timeout=5)
+    assert isinstance(ascii_link, TmodbusConnection)
 
 
 @pytest.mark.asyncio

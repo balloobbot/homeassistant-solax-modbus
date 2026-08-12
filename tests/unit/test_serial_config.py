@@ -33,15 +33,15 @@ def test_current_home_assistant_uses_serial_port_selector() -> None:
         assert isinstance(serial_port_validator(), selector.SerialPortSelector)
 
 
-def test_manifest_loads_usb_and_both_modbus_backends() -> None:
-    """The selector and both connection backends declare their dependencies.
+def test_manifest_loads_usb_and_the_tmodbus_backend() -> None:
+    """The selector and the connection backend declare their dependencies.
 
-    Serial ports need tmodbus (its serialx transport opens the proxy URLs the
-    selector offers) and ASCII-over-TCP needs pymodbus, so the integration
-    installs modbus-connection with both extras.
+    tmodbus covers every link type SolaX uses - its serialx transport opens
+    the proxy URLs the selector offers and, since 4.6.0, carries ASCII-over-TCP
+    - so the integration installs modbus-connection with just that extra.
     """
     manifest_path = Path(__file__).parents[2] / "custom_components" / "solax_modbus" / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
 
     assert "usb" in manifest["dependencies"]
-    assert "modbus-connection[pymodbus,tmodbus]>=4.6.0" in manifest["requirements"]
+    assert "modbus-connection[tmodbus]>=4.6.0" in manifest["requirements"]

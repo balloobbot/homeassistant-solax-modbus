@@ -1669,7 +1669,7 @@ name = "homeassistant-solax-modbus"
 version = "0.0.0"
 source = { virtual = "." }
 dependencies = [
-    { name = "modbus-connection", extra = ["pymodbus", "tmodbus"] },
+    { name = "modbus-connection", extra = ["tmodbus"] },
 ]
 
 [package.dev-dependencies]
@@ -1690,7 +1690,7 @@ test = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "modbus-connection", extras = ["pymodbus", "tmodbus"], specifier = ">=4.6.0" }]
+requires-dist = [{ name = "modbus-connection", extras = ["tmodbus"], specifier = ">=4.6.0" }]
 
 [package.metadata.requires-dev]
 dev = [
@@ -2046,9 +2046,6 @@ wheels = [
 ]
 
 [package.optional-dependencies]
-pymodbus = [
-    { name = "pymodbus", extra = ["serial"] },
-]
 tmodbus = [
     { name = "tmodbus", extra = ["async-serial"] },
 ]
@@ -2940,20 +2937,6 @@ wheels = [
 ]
 
 [[package]]
-name = "pymodbus"
-version = "3.11.4"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/2a/af/bbb716301ab9c60f0702c3cdf72cc0e373286a5648fe16bc4431400489dc/pymodbus-3.11.4.tar.gz", hash = "sha256:6910e385cb6b2f983cd457e9ecee2ff580dbb23cf3d84aefec0845e71edd606a", size = 163422 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/02/80/84c32440949c77f2c201c38e5fa56fd8f19da31bf24df55bdbdaba67767c/pymodbus-3.11.4-py3-none-any.whl", hash = "sha256:89865929f53bd5e32b4076dde00ee86d9b8afb1686832ed74e69d55df22729c3", size = 166002 },
-]
-
-[package.optional-dependencies]
-serial = [
-    { name = "pyserial" },
-]
-
-[[package]]
 name = "pyobjc-core"
 version = "12.1"
 source = { registry = "https://pypi.org/simple" }
@@ -3062,15 +3045,6 @@ name = "pyric"
 version = "0.1.6.3"
 source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/08/64/a99f27d3b4347486c7bfc0aa516016c46dc4c0f380ffccbd742a61af1eda/PyRIC-0.1.6.3.tar.gz", hash = "sha256:b539b01cafebd2406c00097f94525ea0f8ecd1dd92f7731f43eac0ef16c2ccc9", size = 870401 }
-
-[[package]]
-name = "pyserial"
-version = "3.5"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/1e/7d/ae3f0a63f41e4d2f6cb66a5b57197850f919f59e558159a4dd3a818f5082/pyserial-3.5.tar.gz", hash = "sha256:3c77e014170dfffbd816e6ffc205e9842efb10be9f58ec16d3e8675b4925cddb", size = 159125 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/07/bc/587a445451b253b285629263eb51c2d8e9bcea4fc97826266d186f96f558/pyserial-3.5-py2.py3-none-any.whl", hash = "sha256:c4451db6ba391ca6ca299fb3ec7bae67a5c55dde170964c7a14ceefec02f2cf0", size = 90585 },
-]
 
 [[package]]
 name = "pyspeex-noise"

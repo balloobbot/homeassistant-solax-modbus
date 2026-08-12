@@ -28,6 +28,12 @@ from modbus_connection import (
     ModbusUnit,
 )
 
+# tmodbus covers every link type SolaX uses: TCP with socket, rtu or ascii
+# framing (ascii rides serialx's socket:// transport since 4.6.0) and serial
+# ports, where serialx also opens the esphome-hass:// URLs the config flow
+# offers for remote RS485 adapters.
+from modbus_connection.tmodbus import ModbusConnection as TmodbusConnection
+
 from .const import (
     CONF_BAUDRATE,
     CONF_INTERFACE,
@@ -84,29 +90,6 @@ def build_params(config: Mapping[str, Any]) -> ModbusParams | None:
     return None
 
 
-def _connection_class(params: ModbusParams) -> type[ModbusConnection]:
-    """Return the backend that can actually speak this link.
-
-    Neither backend covers everything SolaX needs, so the choice is per link:
-
-    - ASCII framing over a TCP socket is pymodbus-only; the tmodbus backend
-      rejects it at construction.
-    - Serial ports are tmodbus-only, because its serialx transport accepts the
-      ``esphome-hass://`` URLs the config flow offers for remote RS485 adapters,
-      which pyserial cannot open.
-
-    Everything else works on either; tmodbus is the default.
-    """
-    if isinstance(params, ModbusTcpParams) and params.framer == "ascii":
-        from modbus_connection.pymodbus import ModbusConnection as PymodbusConnection
-
-        return PymodbusConnection
-
-    from modbus_connection.tmodbus import ModbusConnection as TmodbusConnection
-
-    return TmodbusConnection
-
-
 def describe(params: ModbusParams) -> str:
     """Return a short, user-facing description of a link."""
     if isinstance(params, ModbusSerialParams):
@@ -136,7 +119,7 @@ def acquire(hass: HomeAssistant, params: ModbusParams, owner: str, *, timeout: f
     links = _links(hass)
     link = links.get(params.endpoint)
     if link is None:
-        connection = _connection_class(params)(params, timeout=timeout)
+        connection = TmodbusConnection(params, timeout=timeout)
         link = links[params.endpoint] = _SharedLink(connection, params)
         _LOGGER.debug("%s: opened a Modbus link to %s", owner, describe(params))
     elif link.params != params:
