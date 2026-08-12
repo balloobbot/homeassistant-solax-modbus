@@ -55,13 +55,12 @@ def test_core_modbus_and_incomplete_tcp_configs_have_no_link() -> None:
     assert modbus_link.build_params({CONF_INTERFACE: "tcp"}) is None
 
 
-def test_ascii_over_tcp_needs_the_pymodbus_backend() -> None:
-    # tmodbus refuses ASCII framing over a socket, so that one link picks the
-    # other backend; a serial port must stay on tmodbus for its serialx URLs.
+def test_ascii_over_tcp_routes_to_the_pymodbus_backend() -> None:
+    # 4.6.0's tmodbus backend carries ASCII-over-TCP too, but the routing
+    # still picks pymodbus for it; a serial port must stay on tmodbus for its
+    # serialx URLs.
     ascii_tcp = ModbusTcpParams(host="10.0.0.5", framer="ascii")
     assert modbus_link._connection_class(ascii_tcp) is PymodbusConnection
-    with pytest.raises(ValueError, match="ASCII-over-TCP"):
-        TmodbusConnection(ascii_tcp)
 
     assert modbus_link._connection_class(ModbusTcpParams(host="10.0.0.5")) is TmodbusConnection
     assert modbus_link._connection_class(ModbusTcpParams(host="10.0.0.5", framer="rtu")) is TmodbusConnection
