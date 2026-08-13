@@ -6,7 +6,7 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from modbus_connection import IllegalDataAddressError
+from modbus_connection import IllegalDataAddressError, ModbusConnectionError, ModbusTimeoutError
 
 from custom_components.solax_modbus import BlockReadResult, PendingWrite, SolaXModbusHub
 from custom_components.solax_modbus.const import REGISTER_U16, PollOutcome
@@ -280,6 +280,86 @@ async def test_block_error_preserves_ignore_readerror_semantics(
         tolerated=tolerated,
     )
     assert ("vpp_status" in data) is value_is_kept
+
+
+def make_decoding_hub() -> Any:
+    """Extend the polling hub with the state a real block decode needs."""
+    hub = make_hub()
+    hub.cyclecount = 20
+    hub._modbus_addr = 1
+    hub._validate_register_func = None
+    hub.tmpdata_expiry = {}
+    hub._record_block_result = Mock()
+    hub.plugin.order32 = "big"
+    return hub
+
+
+def make_decodable_block(start: int, key: str) -> Any:
+    """Build a one-register holding block that survives a tolerated failure."""
+    descr = SimpleNamespace(
+        key=key,
+        register=start,
+        register_data_type=REGISTER_U16,
+        wordcount=1,
+        scale=1,
+        rounding=0,
+        read_scale=1,
+        read_scale_exceptions=None,
+        sleepmode=None,
+        ignore_readerror=True,
+        internal=False,
+        native_unit_of_measurement=None,
+    )
+    return SimpleNamespace(start=start, end=start + 1, regs=[start], descriptions={start: descr})
+
+
+def make_two_block_group() -> Any:
+    """A group whose two holding blocks are read independently."""
+    group = make_group()
+    group.holdingBlocks = [make_decodable_block(0x10, "live"), make_decodable_block(0x20, "stale")]
+    return group
+
+
+@pytest.mark.asyncio
+async def test_timed_out_block_does_not_hold_back_the_rest_of_the_poll() -> None:
+    # The failure a real Sofar showed: one block goes quiet while the rest of
+    # the device answers normally.
+    hub = make_decoding_hub()
+    hub.data["stale"] = 7
+    group = make_two_block_group()
+
+    async def read(unit: int, address: int, count: int) -> list[int]:
+        if address == 0x20:
+            raise ModbusTimeoutError("no answer")
+        return [42]
+
+    hub.async_read_holding_registers = read
+
+    result = await hub.async_read_modbus_registers_all(group)
+
+    assert result is PollOutcome.PARTIAL
+    assert hub.data["live"] == 42
+    assert hub.data["stale"] == 7
+    assert group.publish_updates is True
+
+
+@pytest.mark.asyncio
+async def test_dead_link_fails_every_block_and_publishes_nothing() -> None:
+    hub = make_decoding_hub()
+    hub.data["stale"] = 7
+    group = make_two_block_group()
+
+    async def read(unit: int, address: int, count: int) -> list[int]:
+        raise ModbusConnectionError("link is down")
+
+    hub.async_read_holding_registers = read
+
+    result = await hub.async_read_modbus_registers_all(group)
+
+    assert result is PollOutcome.FAILED
+    assert "live" not in hub.data
+    assert hub.data["stale"] == 7
+    assert group.publish_updates is False
 
 
 @pytest.mark.asyncio
