@@ -4227,9 +4227,15 @@ class battery_config(base_battery_config):
         _LOGGER.info(f"serials {self.batt_pack_serials}")
 
     async def _determinate_batt_pack_serial(self, hub: Any) -> str | None:
-        inverter_data = await hub.async_read_holding_registers(
-            unit=hub._modbus_addr, address=self.batt_pack_serial_address, count=self.batt_pack_serial_len
-        )
+        try:
+            inverter_data = await hub.async_read_holding_registers(
+                unit=hub._modbus_addr, address=self.batt_pack_serial_address, count=self.batt_pack_serial_len
+            )
+        except ModbusError:
+            # Runs during platform setup, which HA does not retry: a read that
+            # escapes here costs every Sofar sensor until the entry is reloaded.
+            _LOGGER.warning(f"{hub.name}: cannot read battery pack serial at 0x{self.batt_pack_serial_address:x}")
+            return None
         return decode_string(inverter_data[: self.batt_pack_serial_len])
 
 
