@@ -10,7 +10,7 @@ from typing import Any, Self
 from homeassistant.components.button import ButtonEntityDescription
 from homeassistant.components.number import NumberEntityDescription
 from homeassistant.components.select import SelectEntityDescription
-from homeassistant.components.sensor import SensorEntityDescription
+from homeassistant.components.sensor import SensorEntityDescription, SensorStateClass
 from homeassistant.components.switch import SwitchEntityDescription
 from homeassistant.components.time import TimeEntityDescription
 from homeassistant.const import CONF_SCAN_INTERVAL
@@ -282,6 +282,15 @@ class BaseModbusSensorEntityDescription(SensorEntityDescription):
     _riemann_data_hub: Any = None  # Riemann data hub reference
     _is_daily_delta_sensor: bool = False  # Whether this is a daily delta sensor calculated from a cumulative total
     _daily_delta_source_key: str | None = None  # Source cumulative total key for daily delta sensors
+
+    @property
+    def keep_last_value_on_readerror(self) -> bool:
+        """Whether a read error must leave the last value in place.
+
+        Dropping a running total publishes "unknown", which gaps long-term
+        statistics as badly as going unavailable; a stale total does not.
+        """
+        return self.state_class in (SensorStateClass.TOTAL, SensorStateClass.TOTAL_INCREASING)
 
 
 @dataclass(kw_only=True, frozen=True)

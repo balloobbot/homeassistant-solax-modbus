@@ -6,10 +6,15 @@ from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from homeassistant.components.sensor import SensorStateClass
 from modbus_connection import IllegalDataAddressError, ModbusConnectionError, ModbusTimeoutError
 
 from custom_components.solax_modbus import BlockReadResult, PendingWrite, SolaXModbusHub
-from custom_components.solax_modbus.const import REGISTER_U16, PollOutcome
+from custom_components.solax_modbus.const import (
+    REGISTER_U16,
+    BaseModbusSensorEntityDescription,
+    PollOutcome,
+)
 
 
 def make_hub() -> Any:
@@ -280,6 +285,40 @@ async def test_block_error_preserves_ignore_readerror_semantics(
         tolerated=tolerated,
     )
     assert ("vpp_status" in data) is value_is_kept
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("state_class", "value_is_kept"),
+    [
+        (SensorStateClass.TOTAL_INCREASING, True),
+        (SensorStateClass.TOTAL, True),
+        (SensorStateClass.MEASUREMENT, False),
+    ],
+)
+async def test_failed_block_keeps_the_last_value_of_a_statistics_sensor(
+    state_class: SensorStateClass,
+    value_is_kept: bool,
+) -> None:
+    # Dropping a running total publishes "unknown", which gaps long-term
+    # statistics; an instantaneous reading is better dropped than served stale.
+    hub = make_hub()
+    hub.cyclecount = 20
+    hub._modbus_addr = 1
+    hub._record_block_result = Mock()
+    hub.async_read_holding_registers = AsyncMock(side_effect=IllegalDataAddressError())
+    description = BaseModbusSensorEntityDescription(key="total_yield", state_class=state_class)
+    block = SimpleNamespace(
+        start=0x423,
+        end=0x424,
+        regs=[0x423],
+        descriptions={0x423: description},
+    )
+    data = {"total_yield": 1234.5}
+
+    await hub.async_read_modbus_block(data, block, "holding")
+
+    assert ("total_yield" in data) is value_is_kept
 
 
 def make_decoding_hub() -> Any:

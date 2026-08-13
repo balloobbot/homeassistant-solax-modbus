@@ -1773,7 +1773,7 @@ class SolaXModbusHub:
                         _LOGGER.debug(f"{self._name}: returning static {k} = {d_ignore}")
                         data[k] = d_ignore  # return something static
                     else:
-                        if d_ignore is False:  # remove potentially faulty data
+                        if d_ignore is False and not getattr(d, "keep_last_value_on_readerror", False):  # remove potentially faulty data
                             popped = data.pop(k, None)  # added 20250716
                             _LOGGER.debug(f"{self._name}: popping {k} = {popped}")
                         else:
