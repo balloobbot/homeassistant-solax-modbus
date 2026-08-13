@@ -1,7 +1,9 @@
-from datetime import date, timedelta
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import Mock
+
+import homeassistant.util.dt as dt_util
 
 from custom_components.solax_modbus.const import BaseModbusSensorEntityDescription
 from custom_components.solax_modbus.sensor import DailyDeltaEnergySensor
@@ -40,7 +42,8 @@ def test_daily_delta_resets_on_new_day() -> None:
     sensor.modbus_data_updated()
     assert sensor.native_value == 0.07
 
-    sensor._last_reset_date = date.today() - timedelta(days=1)
+    # The sensor dates itself by Home Assistant's clock, not the system's.
+    sensor._last_reset_date = dt_util.now().date() - timedelta(days=1)
     hub.data["grid_export_energy_total"] = 2.45
     sensor.modbus_data_updated()
 
