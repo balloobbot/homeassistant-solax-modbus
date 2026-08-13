@@ -2406,6 +2406,11 @@ class SolaXModbusHub:
             "last_recovered_register": self._comm_last_recovered_register,
         }
 
+    def communication_failed_blocks(self) -> list[str]:
+        """Blocks still inside their failure window — this hub's "what did not answer"."""
+        now = _mtime.time()
+        return sorted(key for key, failures in self._comm_block_failures.items() if any(now - ts <= COMM_BLOCK_FAILURE_WINDOW for ts in failures))
+
     def communication_quarantine_attributes(self) -> dict[str, Any]:
         registers = [self._format_register(typ, addr) for typ in ("holding", "input") for addr in sorted(self.bad_regs[typ])]
         return {
@@ -2416,6 +2421,27 @@ class SolaXModbusHub:
             "last_quarantined_register": self._comm_last_quarantined_register,
             "last_recovered_register": self._comm_last_recovered_register,
         }
+
+    async def async_read_raw(self) -> dict[str, dict[int, int]]:
+        """Every register this hub polls, undecoded — for diagnostics.
+
+        Re-reads the planned blocks so the dump is the live register state, not
+        the decoded snapshot. A block that fails is left out: a partial dump is
+        worth more to a bug report than a failed download.
+        """
+        raw: dict[str, dict[int, int]] = {"holding": {}, "input": {}}
+        for interval_group in self.groups.values():
+            for device_group in interval_group.device_groups.values():
+                for typ, blocks in (("holding", device_group.holdingBlocks), ("input", device_group.inputBlocks)):
+                    for block_obj in blocks:
+                        try:
+                            regs = await self._async_read_registers(typ, self._modbus_addr, block_obj.start, block_obj.end - block_obj.start)
+                        except ModbusError as ex:
+                            _LOGGER.debug(f"{self._name}: raw read of {self._block_key(block_obj, typ)} failed: {ex}")
+                            continue
+                        for offset, value in enumerate(regs):
+                            raw[typ][block_obj.start + offset] = value
+        return raw
 
     def _entity_span_end(self, desc_map: dict[int, Any], base_reg: int) -> int:
         """Compute end address (exclusive) for a single entity starting at base_reg based on its unit.
