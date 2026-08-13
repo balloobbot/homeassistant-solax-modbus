@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import homeassistant.util.dt as dt_util
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import RestoreSensor, SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_NAME, PERCENTAGE, STATE_UNAVAILABLE, STATE_UNKNOWN, EntityCategory
 from homeassistant.core import HomeAssistant, callback
@@ -528,6 +528,24 @@ class SolaXModbusSensor(SensorEntity):
         return attrs
 
 
+class SolaXModbusRestoreSensor(SolaXModbusSensor, RestoreSensor):
+    """A total that seeds itself from the previous run.
+
+    keep_last_value_on_readerror holds a total across a failed block, but a
+    restart empties hub.data, so without this the total reads "unknown" until
+    its block is polled again — a gap in long-term statistics on an inverter
+    that is asleep when Home Assistant comes back up.
+    """
+
+    async def async_added_to_hass(self) -> None:
+        """Restore the last known total before the hub can publish over it."""
+        if self.entity_description.key not in self._hub.data:
+            last_data = await self.async_get_last_sensor_data()
+            if last_data is not None and last_data.native_value is not None:
+                self._hub.data[self.entity_description.key] = last_data.native_value
+        await super().async_added_to_hass()
+
+
 class RiemannSumEnergySensor(SolaXModbusSensor, RestoreEntity):
     """Energy sensor that calculates cumulative energy using Riemann sum integration."""
 
@@ -880,6 +898,13 @@ def entityToListSingle(
         )
     elif getattr(newdescr, "_is_daily_delta_sensor", False):
         sensor = DailyDeltaEnergySensor(
+            hub_name,
+            hub,
+            device_info,
+            newdescr,
+        )
+    elif newdescr.keep_last_value_on_readerror:
+        sensor = SolaXModbusRestoreSensor(
             hub_name,
             hub,
             device_info,

@@ -5,6 +5,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
+from functools import cached_property
 from typing import Any, Self
 
 from homeassistant.components.button import ButtonEntityDescription
@@ -283,7 +284,8 @@ class BaseModbusSensorEntityDescription(SensorEntityDescription):
     _is_daily_delta_sensor: bool = False  # Whether this is a daily delta sensor calculated from a cumulative total
     _daily_delta_source_key: str | None = None  # Source cumulative total key for daily delta sensors
 
-    @property
+    # cached_property writes into the instance dict, which frozen does not guard.
+    @cached_property
     def keep_last_value_on_readerror(self) -> bool:
         """Whether a read error must leave the last value in place.
 
