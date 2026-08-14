@@ -15,6 +15,7 @@ from typing import Any, cast
 
 import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
+from homeassistant.components.sensor import SensorStateClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     CONF_NAME,
@@ -470,6 +471,20 @@ def Gen4Timestring(numb: int) -> str:
     h = numb % 256
     m = numb >> 8
     return f"{h:02d}:{m:02d}"
+
+
+def _is_torn_total(descr: Any, value: Any, last: Any) -> bool:
+    """Whether a TOTAL_INCREASING read dipped less than 1% below its last value.
+
+    Some inverters serve a multi-register counter mid-update, so a poll occasionally reads a hair low and Home
+    Assistant treats it as a meter reset. 1% separates that from a real reset; a TOTAL may legitimately fall.
+    """
+    return (
+        getattr(descr, "state_class", None) == SensorStateClass.TOTAL_INCREASING
+        and isinstance(value, (int, float))
+        and isinstance(last, (int, float))
+        and last * 0.99 <= value < last
+    )
 
 
 @dataclass
@@ -1678,7 +1693,8 @@ class SolaXModbusHub:
             and ((descr.sleepmode != SLEEPMODE_LASTAWAKE) or self.plugin.isAwake(data))
             and (self.localsLoaded or not descr.read_scale_exceptions)  # ignore as long as read scale is not adapted; may delay real startup a bit
         ):
-            data[descr.key] = return_value  # case prevent_update number
+            if not _is_torn_total(descr, return_value, data.get(descr.key)):
+                data[descr.key] = return_value  # case prevent_update number
             if fresh_keys is not None:
                 fresh_keys.add(descr.key)
         return idx + (words_used if advance else 0)
