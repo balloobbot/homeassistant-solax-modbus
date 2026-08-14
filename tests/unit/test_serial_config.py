@@ -44,4 +44,4 @@ def test_manifest_loads_usb_and_the_tmodbus_backend() -> None:
     manifest = json.loads(manifest_path.read_text())
 
     assert "usb" in manifest["dependencies"]
-    assert "modbus-connection[tmodbus]>=4.6.1" in manifest["requirements"]
+    assert "modbus-connection[tmodbus]>=4.7.0" in manifest["requirements"]

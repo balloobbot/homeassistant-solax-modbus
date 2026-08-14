@@ -1139,7 +1139,7 @@ test = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "modbus-connection", extras = ["tmodbus"], specifier = ">=4.6.1" }]
+requires-dist = [{ name = "modbus-connection", extras = ["tmodbus"], specifier = ">=4.7.0" }]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1386,11 +1386,11 @@ sdist = { url = "https://files.pythonhosted.org/packages/9a/02/cef85a80ff6d3092a
 
 [[package]]
 name = "modbus-connection"
-version = "4.6.1"
+version = "4.7.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/e2/3c/15e2946dc5f5ac77dfc96816ff3f4f1166904aef8d0c538bf1a176885466/modbus_connection-4.6.1.tar.gz", hash = "sha256:377e252b6fc54c5dc239fbdec0b53a1185888a71c3a4e78552690c7a9a19ab04", size = 250218 }
+sdist = { url = "https://files.pythonhosted.org/packages/a2/05/f3651ec9e8f827b27c253c1cab8d73017cb431dd25adc9e963c63cab59d4/modbus_connection-4.7.0.tar.gz", hash = "sha256:4339e2181afceaae9870fb673bb304ee62857b67bb1401246c106e0faa749f2e", size = 251983 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/8f/a8/12305eafb81fcbf24d2a3b9cf18e033967ba251221c6b5ac9568ded8ea22/modbus_connection-4.6.1-py3-none-any.whl", hash = "sha256:5228820180b34a60879bf11d3c90a191338c0a2daeb1f4b3e862732b5264dcc2", size = 77039 },
+    { url = "https://files.pythonhosted.org/packages/ad/75/8d88f7b1b5f5089e7be30f7b3d9a8c4d04d331b58fdaab195d6a2813c968/modbus_connection-4.7.0-py3-none-any.whl", hash = "sha256:02cf37957a3eaee785a469a6bb5df637e452982128aff0c85b93dca2d192b64c", size = 77068 },
 ]
 
 [package.optional-dependencies]
@@ -2508,14 +2508,14 @@ wheels = [
 
 [[package]]
 name = "tmodbus"
-version = "0.5.0"
+version = "0.5.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "tenacity" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/08/87/56312cea851d4893136010c27b3d8f13f1b14163d96dff5c1c212f963f1e/tmodbus-0.5.0.tar.gz", hash = "sha256:3ed5602d742c76c4a1a714c4c7fae6ad6e59c0e4b262b32cbe9fed948fcc727e", size = 149397 }
+sdist = { url = "https://files.pythonhosted.org/packages/37/69/7b023b4f2629ac72fab500e8360c29240614285a8d7761be3c2105c72bd7/tmodbus-0.5.1.tar.gz", hash = "sha256:bb283952c0b00b1b55d7c0d85b808d5b517af5c3a1356af93e52caae810868f4", size = 149825 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/71/20/bbe3315cc5b0239eb5b2aaa9caedfb531f288bce34d44201a78d253c2826/tmodbus-0.5.0-py3-none-any.whl", hash = "sha256:66bc78028e33225be0fe35b746eefd7c0021bedc4cd82793c1aeb2f47e85c2ee", size = 91821 },
+    { url = "https://files.pythonhosted.org/packages/de/fc/195cbd3626c5d8c1ea619c22474a9e00ba5625476a76fd2be9435344715e/tmodbus-0.5.1-py3-none-any.whl", hash = "sha256:6ffa97235b07a254dc168b210174af122e3d2e4d393a6458e8f2d1352404feef", size = 91997 },
 ]
 
 [package.optional-dependencies]
