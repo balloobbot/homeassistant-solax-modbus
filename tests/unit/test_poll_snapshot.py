@@ -580,7 +580,7 @@ async def test_slowdown_skip_does_not_read_or_change_slowdown() -> None:
     hub.sleepnone = []
     hub.sleepzero = []
     hub.async_read_modbus_data = AsyncMock(return_value=PollOutcome.SUCCESS)
-    interval_group = SimpleNamespace(device_groups={"test": make_group()})
+    interval_group = SimpleNamespace(device_groups={"test": make_group()}, skipped_polls=0)
 
     outcome, updated_sensors = await hub._refresh_interval_group_once(interval_group)
 
@@ -588,6 +588,31 @@ async def test_slowdown_skip_does_not_read_or_change_slowdown() -> None:
     assert updated_sensors == 0
     assert hub.slowdown == 10
     hub.async_read_modbus_data.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_slowdown_counts_each_interval_group_s_own_ticks() -> None:
+    hub = make_hub()
+    hub.blocks_changed = False
+    hub.cyclecount = 0
+    hub.slowdown = 10
+    hub.sleepnone = []
+    hub.sleepzero = []
+    hub.async_read_modbus_data = AsyncMock(return_value=PollOutcome.SUCCESS)
+    fast = SimpleNamespace(device_groups={"test": make_group()}, skipped_polls=0)
+    slow = SimpleNamespace(device_groups={"test": make_group()}, skipped_polls=0)
+
+    for _ in range(9):
+        hub.cyclecount += 1
+        assert (await hub._refresh_interval_group_once(fast))[0] is PollOutcome.SKIPPED
+
+    # A shared counter would let the slow group ride in on the fast group's ticks.
+    hub.cyclecount += 1
+    assert (await hub._refresh_interval_group_once(slow))[0] is PollOutcome.SKIPPED
+    hub.async_read_modbus_data.assert_not_awaited()
+
+    # The fast group's own tenth tick is the one that polls.
+    assert (await hub._refresh_interval_group_once(fast))[0] is PollOutcome.SUCCESS
 
 
 @pytest.mark.asyncio

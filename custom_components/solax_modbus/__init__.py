@@ -40,8 +40,10 @@ from modbus_connection import (
     IllegalDataAddressError,
     IllegalFunctionError,
     ModbusConnectionError,
+    ModbusDesyncError,
     ModbusError,
     ModbusExceptionError,
+    ModbusTimeoutError,
 )
 
 from .connection import (
@@ -139,6 +141,7 @@ COMM_BLOCK_FAILURE_THRESHOLD = 3
 COMM_BLOCK_FAILURE_WINDOW = 600
 COMM_RECOVERY_INTERVAL = 300
 INFLIGHT_CANCEL_TIMEOUT = 2.0
+UNANSWERED_REQUESTS_BEFORE_RECONNECT = 3
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -169,6 +172,7 @@ def empty_hub_interval_group_lambda() -> SimpleNamespace:
         device_groups={},
         poll_lock=asyncio.Lock(),
         pending_rerun=False,
+        skipped_polls=0,
     )
 
 
@@ -596,6 +600,7 @@ class SolaXModbusHub:
         self.tmpdata_expiry: dict[Any, Any] = {}  # expiry timestamps for tempdata
         self.cyclecount: int = 0  # temporary - remove later
         self.slowdown: int = 1  # slow down factor when modbus is not responding: 1 : no slowdown, 10: ignore 9 out of 10 cycles
+        self._unanswered_requests: int = 0  # consecutive requests the device did not answer
         self.computedSensors: dict[Any, Any] = {}
         self.computedEntities: dict[Any, Any] = {}  # buttons and selects with value_function for autorepeat
         self.computedSwitches: dict[Any, Any] = {}
@@ -1105,8 +1110,12 @@ class SolaXModbusHub:
             return PollOutcome.SKIPPED, 0
         if self.blocks_changed:
             self.rebuild_blocks(self.initial_groups)
-        if not bypass_slowdown and (self.cyclecount % self.slowdown) != 0:
+        # Count this group's own ticks: a shared counter would let a fast group's
+        # ticks decide when a slow one gets to run.
+        if not bypass_slowdown and self.slowdown > 1 and interval_group.skipped_polls < self.slowdown - 1:
+            interval_group.skipped_polls += 1
             return PollOutcome.SKIPPED, 0
+        interval_group.skipped_polls = 0
 
         outcomes: list[PollOutcome] = []
         updated_sensors = 0
@@ -1344,10 +1353,25 @@ class SolaXModbusHub:
 
         if isinstance(exception_error, ModbusConnectionError) or not self._transport.is_connected():
             _LOGGER.debug(f"{self._name}: {operation} lost the connection; dropping the link before the next request")
+            self._unanswered_requests = 0
             await self._transport.disconnect()
             return
 
-        _LOGGER.debug(f"{self._name}: {operation} failed while the link is still up; the next request retries on it")
+        if not isinstance(exception_error, ModbusTimeoutError | ModbusDesyncError):
+            # The device answered, even if it answered with an error code.
+            self._unanswered_requests = 0
+            _LOGGER.debug(f"{self._name}: {operation} failed while the link is still up; the next request retries on it")
+            return
+
+        self._unanswered_requests += 1
+        if self._unanswered_requests < UNANSWERED_REQUESTS_BEFORE_RECONNECT:
+            _LOGGER.debug(f"{self._name}: {operation} went unanswered ({self._unanswered_requests}); retrying on the same link")
+            return
+
+        # A bridge can keep the socket open long after it stopped relaying.
+        _LOGGER.debug(f"{self._name}: {operation} went unanswered {self._unanswered_requests} times; dropping the wedged link")
+        self._unanswered_requests = 0
+        await self._transport.disconnect()
 
     async def async_read_holding_registers(self, unit: int, address: int, count: int) -> list[int]:
         """Read holding registers, or raise ``ModbusError``."""
@@ -1377,6 +1401,7 @@ class SolaXModbusHub:
             _LOGGER.error(f"Error: device: {unit} address: 0x{address:x} -> {exception_error!s}")
             await self._handle_transport_exception(exception_error, f"{register_type} read")
             raise
+        self._unanswered_requests = 0
         return cast(list[int], registers)
 
     def _encode_write_value(
@@ -1468,6 +1493,7 @@ class SolaXModbusHub:
         except ModbusError as ex:
             await self._handle_transport_exception(ex, operation)
             raise HomeAssistantError(f"{self._name}: {operation} failed: {ex}") from ex
+        self._unanswered_requests = 0
 
     async def async_lowlevel_write_register(self, unit: int, address: int, payload: int, register_data_type: str | None = None) -> None:
         try:

@@ -64,6 +64,7 @@ def make_hub(transport: Any) -> Any:
     hub._name = "test"
     hub._stopping = False
     hub._inflight_tasks = set()
+    hub._unanswered_requests = 0
     hub._link_params = None
     hub.plugin = SimpleNamespace(order32="big")
     return hub
